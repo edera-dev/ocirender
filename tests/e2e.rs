@@ -115,22 +115,22 @@ fn get_fixtures() -> &'static Fixtures {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Run `oci2squashfs_cli convert` and return the path to the output file.
-fn convert(image_dir: &Path, out_dir: &Path, name: &str) -> PathBuf {
+/// Run `oci2squashfs_cli convert-squashfs` and return the path to the output file.
+fn convert_squashfs(image_dir: &Path, out_dir: &Path, name: &str) -> PathBuf {
     let output = out_dir.join(format!("{name}.squashfs"));
     let status = Command::new(cli_bin())
         .args([
-            "convert",
+            "convert-squashfs",
             "--image",
             image_dir.to_str().unwrap(),
             "--output",
             output.to_str().unwrap(),
         ])
         .status()
-        .expect("spawning oci2squashfs_cli convert");
+        .expect("spawning oci2squashfs_cli convert-squashfs");
     assert!(
         status.success(),
-        "oci2squashfs_cli convert failed for {name} (image: {})",
+        "oci2squashfs_cli convert-squashfs failed for {name} (image: {})",
         image_dir.display()
     );
     output
@@ -188,7 +188,7 @@ fn e2e_oci_layout_convert_and_verify() {
     let fx = get_fixtures();
     let work = TempDir::new().unwrap();
 
-    let squashfs = convert(&fx.oci_layout, work.path(), "oci-layout");
+    let squashfs = convert_squashfs(&fx.oci_layout, work.path(), "oci-layout");
     let reference = umoci_unpack(&fx.oci_layout, "latest", work.path(), "oci-layout");
     verify_clean(&squashfs, &reference, "oci-layout");
 }
@@ -199,7 +199,7 @@ fn e2e_docker_save_convert_and_verify() {
     let fx = get_fixtures();
     let work = TempDir::new().unwrap();
 
-    let squashfs = convert(&fx.docker_save, work.path(), "docker-save");
+    let squashfs = convert_squashfs(&fx.docker_save, work.path(), "docker-save");
     // Docker save images have no OCI tag; use the OCI-layout image as the
     // reference since they share the same layer blobs and logical content.
     let reference = umoci_unpack(&fx.oci_layout, "latest", work.path(), "docker-save-ref");
@@ -213,7 +213,7 @@ fn e2e_both_metadata_files_prefers_index_json() {
     let fx = get_fixtures();
     let work = TempDir::new().unwrap();
 
-    let squashfs = convert(&fx.docker_save_both, work.path(), "both");
+    let squashfs = convert_squashfs(&fx.docker_save_both, work.path(), "both");
     let reference = umoci_unpack(&fx.oci_layout, "latest", work.path(), "both-ref");
     verify_clean(&squashfs, &reference, "docker-save-both (index.json preferred)");
 }
@@ -229,7 +229,7 @@ fn e2e_overlay_semantics_verified() {
     // This is the same convert+verify as the oci-layout test, but we keep it
     // as a distinct test with a distinct label so failures here are
     // unambiguously about overlay correctness rather than metadata parsing.
-    let squashfs = convert(&fx.oci_layout, work.path(), "overlay-semantics");
+    let squashfs = convert_squashfs(&fx.oci_layout, work.path(), "overlay-semantics");
     let reference = umoci_unpack(&fx.oci_layout, "latest", work.path(), "overlay-semantics-ref");
     verify_clean(&squashfs, &reference, "overlay semantics");
 }
