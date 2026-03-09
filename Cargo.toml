@@ -1,3 +1,32 @@
-[workspace]
-members = ["oci2squashfs", "oci2squashfs_cli"]
-resolver = "2"
+[package]
+name = "oci2squashfs"
+description = "OCI to squashfs, without needing to extract layers to disk"
+license = "Apache-2.0"
+version = "0.2.0"
+homepage = "https://github.com/edera-dev/oci2squashfs"
+repository = "https://github.com/edera-dev/oci2squashfs"
+edition = "2024"
+
+[dependencies]
+tokio     = { version = "1", features = ["full"] }
+tar       = "0.4"
+flate2    = { version = "1", features = ["zlib-rs"], default-features = false }
+zstd      = "0.13"
+bzip2     = "0.6"
+xz2       = "0.1"
+serde     = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2      = "0.10"
+tempfile  = "3"
+anyhow    = "1"
+clap          = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+
+[lib]
+name = "oci2squashfs"
+
+[[bin]]
+name = "oci2squashfs_cli"
+path = "bin/main.rs"
