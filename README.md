@@ -162,7 +162,7 @@ oci2squashfs/               # Library crate — all reusable logic
 
 oci2squashfs_cli/           # Binary crate — CLI only, depends on the library
   src/
-    main.rs                 # `oci2squashfs convert` and `oci2squashfs verify`
+    main.rs                 # `oci2squashfs_cli convert` and `oci2squashfs_cli verify`
 ```
 
 ### Key design decisions
@@ -217,7 +217,7 @@ not from file contents.
 ### Convert
 
 ```bash
-oci2squashfs convert --image ./my-image-dir --output my-image.squashfs
+oci2squashfs_cli convert --image ./my-image-dir --output my-image.squashfs
 ```
 
 ### Verify
@@ -227,7 +227,7 @@ directory (e.g. a `docker export` snapshot extracted with `tar -x -p` as
 root):
 
 ```bash
-oci2squashfs verify --squashfs my-image.squashfs --reference ./my-image-ref
+oci2squashfs_cli verify --squashfs my-image.squashfs --reference ./my-image-ref
 ```
 
 The verify subcommand reports:
