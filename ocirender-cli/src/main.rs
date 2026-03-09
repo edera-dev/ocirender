@@ -73,6 +73,19 @@ enum Commands {
         mksquashfs: Option<PathBuf>,
     },
 
+    /// Convert an OCI image directory to a erofs image.
+    ConvertErofs {
+        /// Path to the extracted OCI image directory.
+        #[arg(short, long)]
+        image: PathBuf,
+        /// Output erofs file path.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Path to the mkfs.erofs binary. If None, will attempt to resolve from PATH
+        #[arg(long)]
+        mkfs_erofs: Option<PathBuf>,
+    },
+
     /// Convert an OCI image directory to a tar file.
     ConvertTar {
         /// Path to the extracted OCI image directory.
@@ -160,10 +173,14 @@ enum Commands {
     Verify {
         /// Path to a generated .squashfs file to verify.
         /// Mounted read-only via squashfuse for the duration of the comparison.
-        #[arg(long, conflicts_with = "dir")]
+        #[arg(long, conflicts_with_all = ["dir", "erofs"])]
         squashfs: Option<PathBuf>,
+        /// Path to a generated .erofs file to verify.
+        /// Mounted read-only via erofsfuse for the duration of the comparison.
+        #[arg(long, conflicts_with_all = ["dir", "squashfs"])]
+        erofs: Option<PathBuf>,
         /// Path to a generated directory to verify.
-        #[arg(long, conflicts_with = "squashfs")]
+        #[arg(long, conflicts_with_all = ["erofs", "squashfs"])]
         dir: Option<PathBuf>,
         /// Path to the reference directory.
         #[arg(short, long)]
@@ -219,6 +236,16 @@ async fn main() -> Result<()> {
         } => {
             println!("Converting {} → {}", image.display(), output.display());
             ocirender::convert_mksquashfs(&image, &output, mksquashfs.as_deref()).await?;
+            println!("Done: {}", output.display());
+        }
+
+        Commands::ConvertErofs {
+            image,
+            output,
+            mkfs_erofs,
+        } => {
+            println!("Converting {} → {}", image.display(), output.display());
+            ocirender::convert_erofs(&image, &output, mkfs_erofs.as_deref()).await?;
             println!("Done: {}", output.display());
         }
 
@@ -290,18 +317,23 @@ async fn main() -> Result<()> {
 
         Commands::Verify {
             squashfs,
+            erofs,
             dir,
             reference,
             ignore_ownership,
         } => {
-            let spec = match (squashfs, dir) {
-                (Some(p), None) => ImageSpec::Squashfs {
+            let spec = match (squashfs, erofs, dir) {
+                (Some(p), None, None) => ImageSpec::Squashfs {
                     path: p,
                     binpath: None,
                 },
-                (None, Some(p)) => ImageSpec::Dir { path: p },
-                (None, None) => bail!("one of --squashfs or --dir is required"),
-                (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents this"),
+                (None, Some(p), None) => ImageSpec::Erofs {
+                    path: p,
+                    binpath: None,
+                },
+                (None, None, Some(p)) => ImageSpec::Dir { path: p },
+                (None, None, None) => bail!("one of --squashfs or --dir is required"),
+                _ => unreachable!("clap conflicts_with prevents this"),
             };
 
             let report = tokio::task::spawn_blocking(move || {

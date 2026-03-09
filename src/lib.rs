@@ -1,8 +1,9 @@
 //! OCI image conversion library.
 //!
-//! Converts OCI container images into squashfs filesystem images, plain tar
-//! archives, or extracted directories by merging the image's layer tarballs
-//! directly, without extracting them to intermediate disk storage.
+//! Converts OCI container images into squashfs filesystem images, erofs
+//! filesystem images, plain tar archives, or extracted directories by merging
+//! the image's layer tarballs directly, without extracting them to intermediate
+//! disk storage.
 //!
 //! # Concepts
 //!
@@ -35,6 +36,7 @@
 
 pub mod canonical;
 pub mod dir;
+pub mod erofs;
 pub mod image;
 pub mod layers;
 pub mod overlay;
@@ -65,6 +67,15 @@ pub enum ImageSpec {
         path: PathBuf,
         binpath: Option<PathBuf>,
     },
+    /// An erofs filesystem image.
+    ///
+    /// `binpath` overrides the `mkfs.erofs` binary location when writing; if
+    /// `None`, `mkfs.erofs` is resolved from `PATH`. Ignored when used as a
+    /// verification source.
+    Erofs {
+        path: PathBuf,
+        binpath: Option<PathBuf>,
+    },
     /// A plain tar archive.
     ///
     /// Note: [`verify::verify`] does not support tar sources. Extract to a
@@ -79,7 +90,10 @@ impl ImageSpec {
     /// The filesystem path this spec refers to, regardless of variant.
     pub fn path(&self) -> &Path {
         match self {
-            Self::Squashfs { path, .. } | Self::Tar { path } | Self::Dir { path } => path,
+            Self::Squashfs { path, .. }
+            | Self::Erofs { path, .. }
+            | Self::Tar { path }
+            | Self::Dir { path } => path,
         }
     }
 }
@@ -216,6 +230,13 @@ fn write_for_spec(
             binpath.as_deref(),
             progress_tx,
         ),
+        ImageSpec::Erofs { path, binpath } => erofs::write_erofs_with_progress(
+            receiver,
+            total_layers,
+            &path,
+            binpath.as_deref(),
+            progress_tx,
+        ),
         ImageSpec::Tar { path } => {
             tar::write_tar_with_progress(receiver, total_layers, &path, progress_tx)
         }
@@ -242,6 +263,24 @@ pub async fn convert(image_dir: &Path, spec: ImageSpec) -> Result<()> {
 }
 
 // ── Batch compatibility wrappers ──────────────────────────────────────────────
+
+/// Convert an extracted OCI image directory into an erofs file.
+///
+/// Convenience wrapper around [`convert`] with [`ImageSpec::Erofs`].
+pub async fn convert_erofs(
+    image_dir: &Path,
+    output_erofs: &Path,
+    mkfs_erofs_binpath: Option<&Path>,
+) -> Result<()> {
+    convert(
+        image_dir,
+        ImageSpec::Erofs {
+            path: output_erofs.to_path_buf(),
+            binpath: mkfs_erofs_binpath.map(Path::to_path_buf),
+        },
+    )
+    .await
+}
 
 /// Convert an OCI image directory into a squashfs file.
 ///

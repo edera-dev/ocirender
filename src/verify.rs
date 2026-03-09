@@ -2,9 +2,10 @@
 //!
 //! The public entry point is [`verify`], which accepts an [`ImageSpec`]
 //! describing the generated image and a path to a reference directory. For
-//! squashfs images the filesystem is mounted read-only via `squashfuse` for
-//! the duration of the comparison and unmounted on return. For directory
-//! images the comparison is performed directly.
+//! squashfs and erofs images the filesystem is mounted read-only (via
+//! `squashfuse` or `erofsfuse` respectively) for the duration of the
+//! comparison and unmounted on return. For directory images the comparison
+//! is performed directly.
 //!
 //! Comparison is recursive and checks file type, permissions, ownership,
 //! size, symlink target, and SHA-256 content hash. Results are collected into
@@ -79,6 +80,58 @@ impl Drop for SquashMount {
     }
 }
 
+/// RAII guard that mounts a erofs image via `erofsfuse` on construction
+/// and unmounts it on drop.
+///
+/// The [`TempDir`] holding the mountpoint is kept alive for the lifetime of
+/// this guard. Rust drops fields in declaration order, so `mountpoint` is
+/// dropped after the `Drop` impl runs and the filesystem is unmounted —
+/// ensuring the directory is not deleted while still in use.
+struct ErofsMount {
+    mountpoint: TempDir,
+}
+
+impl ErofsMount {
+    /// Mount `erofs` at a freshly created temporary directory.
+    ///
+    /// Returns an error if `erofsfuse` is not installed or if the mount
+    /// fails.
+    fn new(erofs: &Path) -> Result<Self> {
+        let mountpoint = TempDir::new().context("creating temp mount dir")?;
+        let status = Command::new("erofsfuse")
+            .arg(erofs)
+            .arg(mountpoint.path())
+            .status()
+            .context("spawning erofsfuse — is it installed?")?;
+        if !status.success() {
+            anyhow::bail!("erofsfuse failed with status {status}");
+        }
+        Ok(Self { mountpoint })
+    }
+
+    fn path(&self) -> &Path {
+        self.mountpoint.path()
+    }
+}
+
+impl Drop for ErofsMount {
+    fn drop(&mut self) {
+        // Try fusermount first (Linux FUSE), fall back to umount (macOS/BSD).
+        // Errors are ignored: if unmounting fails here there is nothing useful
+        // to do, and panicking in Drop would abort the process.
+        let ok = Command::new("fusermount")
+            .args(["-u", self.mountpoint.path().to_str().unwrap_or("")])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if !ok {
+            let _ = Command::new("umount").arg(self.mountpoint.path()).status();
+        }
+        // TempDir::drop runs after this, removing the now-unmounted directory.
+    }
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /// The result of comparing a generated image against a reference directory.
@@ -117,6 +170,9 @@ pub struct FileDiff {
 /// - [`ImageSpec::Squashfs`]: mounts the squashfs read-only via `squashfuse`,
 ///   diffs the mount against `reference`, then unmounts. Requires `squashfuse`
 ///   and `fusermount` (Linux) or `umount` (macOS/BSD) to be installed.
+/// - [`ImageSpec::Erofs`]: mounts the erofs image read-only via `erofsfuse`,
+///   diffs the mount against `reference`, then unmounts. Requires `erofsfuse`
+///   and `fusermount` (Linux) or `umount` (macOS/BSD) to be installed.
 /// - [`ImageSpec::Dir`]: diffs the directory directly against `reference`.
 ///   No external tools required.
 /// - [`ImageSpec::Tar`]: returns `Err`. Tar archives cannot be compared
@@ -132,6 +188,10 @@ pub fn verify(spec: ImageSpec, reference: &Path, ignore_ownership: bool) -> Resu
     match spec {
         ImageSpec::Squashfs { path, .. } => {
             let mount = SquashMount::new(&path)?;
+            verify_dirs(mount.path(), reference, ignore_ownership)
+        }
+        ImageSpec::Erofs { path, .. } => {
+            let mount = ErofsMount::new(&path)?;
             verify_dirs(mount.path(), reference, ignore_ownership)
         }
         ImageSpec::Dir { path } => verify_dirs(&path, reference, ignore_ownership),
