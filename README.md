@@ -224,7 +224,7 @@ These are not conversion bugs.
 
 ## System dependencies
 
-- `mksquashfs` ≥ 4.5 (for `-tar` stdin support); available in
-  `squashfs-tools` on most distributions
+- `mksquashfs` ≥ 4.6 (for functionally correct `-tar` stdin support); available
+  in `squashfs-tools` on most distributions
 - `squashfuse` (for the `verify` subcommand only)
 - `fusermount` or `umount` (for squashfuse unmounting in verify)
