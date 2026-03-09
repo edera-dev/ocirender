@@ -31,6 +31,13 @@ pub fn write_squashfs(layers: Vec<LayerBlob>, output: &Path, squashfs_binpath: O
         "-Xcompression-level",
         "2",
         "-quiet",
+        // Ensure the root directory gets mode 0755 and uid/gid 0 regardless
+        // of what the invoking user's identity is.  Without these, mksquashfs
+        // uses the invoking user's uid/gid and 0777 for intermediate
+        // directories that have no explicit tar entry.
+        "-default-mode", "0755",
+        "-default-uid", "0",
+        "-default-gid", "0",
     ])
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())

@@ -218,6 +218,43 @@ fn e2e_both_metadata_files_prefers_index_json() {
     verify_clean(&squashfs, &reference, "docker-save-both (index.json preferred)");
 }
 
+/// Verify that the squashfs root directory has sane permissions (0755) and is
+/// not owned by the invoking user. A missing root tar entry causes mksquashfs
+/// to default to 0777 owned by the build user.
+#[test]
+fn e2e_root_directory_permissions() {
+    let fx = get_fixtures();
+    let work = TempDir::new().unwrap();
+
+    let squashfs = convert_squashfs(&fx.oci_layout, work.path(), "root-perms");
+
+    // `unsquashfs -lls <file> .` lists only the root entry, giving a single
+    // line like: `drwxr-xr-x root/root  265 2026-03-09 11:09 squashfs-root`
+    let out = Command::new("unsquashfs")
+        .args(["-lls", squashfs.to_str().unwrap(), "."])
+        .output()
+        .expect("spawning unsquashfs -lls");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let root_line = stdout
+        .lines()
+        .find(|l| l.ends_with("squashfs-root"))
+        .unwrap_or_else(|| panic!("no squashfs-root line in unsquashfs output:\n{stdout}"));
+
+    // Fields are: <mode> <user>/<group> <size> <date> <time> <path>
+    let mut fields = root_line.split_whitespace();
+    let mode  = fields.next().unwrap_or("");
+    let owner = fields.next().unwrap_or("");
+
+    assert_eq!(
+        mode, "drwxr-xr-x",
+        "squashfs root directory should be mode 0755; got {root_line:?}"
+    );
+    assert_eq!(
+        owner, "root/root",
+        "squashfs root directory should be owned by root/root; got {root_line:?}"
+    );
+}
+
 /// Explicitly verify the overlay semantics that the fixture layers exercise:
 /// whiteouts, opaque whiteouts, and hard links all behave correctly in the
 /// squashfs output compared to the umoci reference.
