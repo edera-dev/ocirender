@@ -435,6 +435,7 @@ dependencies = [
  "bzip2",
  "clap",
  "flate2",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

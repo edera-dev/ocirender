@@ -7,6 +7,14 @@ homepage = "https://github.com/edera-dev/oci2squashfs"
 repository = "https://github.com/edera-dev/oci2squashfs"
 edition = "2024"
 
+[features]
+# Enables end-to-end tests that invoke the compiled CLI binary, mksquashfs,
+# squashfuse, and umoci. These are never compiled into the library or CLI
+# themselves — the feature only gates code inside [[test]] targets.
+#
+# Usage: cargo test --features e2e --test e2e
+e2e = []
+
 [dependencies]
 tokio     = { version = "1", features = ["full"] }
 tar       = "0.4"
@@ -23,6 +31,7 @@ clap          = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+libc  = "0.2"
 
 [lib]
 name = "oci2squashfs"
@@ -30,3 +39,8 @@ name = "oci2squashfs"
 [[bin]]
 name = "oci2squashfs_cli"
 path = "bin/main.rs"
+
+[[test]]
+name = "e2e"
+path = "tests/e2e.rs"
+required-features = ["e2e"]
