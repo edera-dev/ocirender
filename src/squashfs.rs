@@ -10,30 +10,33 @@ use crate::{image::LayerBlob, overlay::merge_layers_into};
 
 /// Convert `layers` into a squashfs image at `output` by streaming a merged
 /// tar directly into mksquashfs's stdin. No full tar buffer is held in memory.
-pub fn write_squashfs(layers: Vec<LayerBlob>, output: &Path) -> Result<()> {
+pub fn write_squashfs(layers: Vec<LayerBlob>, output: &Path, squashfs_binpath: Option<&Path>) -> Result<()> {
     if output.exists() {
         std::fs::remove_file(output)
             .with_context(|| format!("removing existing {}", output.display()))?;
     }
 
-    let mut child = Command::new("mksquashfs")
-        .args([
-            "-",
-            output.to_str().context("output path is not UTF-8")?,
-            "-tar",
-            "-noappend",
-            "-no-fragments",
-            "-comp",
-            "zstd",
-            "-Xcompression-level",
-            "2",
-            "-quiet",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("spawning mksquashfs — is it installed?")?;
+    let mut child = match squashfs_binpath {
+        Some(path) => Command::new(path),
+        None => Command::new("mksquashfs"),
+    }
+    .args([
+        "-",
+        output.to_str().context("output path is not UTF-8")?,
+        "-tar",
+        "-noappend",
+        "-no-fragments",
+        "-comp",
+        "zstd",
+        "-Xcompression-level",
+        "2",
+        "-quiet",
+    ])
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .context("spawning mksquashfs — is it installed?")?;
 
     let stdin = child.stdin.take().context("child stdin")?;
 

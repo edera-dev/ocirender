@@ -19,6 +19,9 @@ enum Commands {
         /// Output squashfs file path.
         #[arg(short, long)]
         output: PathBuf,
+        /// Path to the mksquashfs binary. If None, will attempt to resolve from PATH
+        #[arg(long)]
+        mksquashfs: Option<PathBuf>,
     },
     /// Verify a squashfs image against a reference directory.
     Verify {
@@ -35,9 +38,9 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Convert { image, output } => {
+        Commands::Convert { image, output, mksquashfs } => {
             println!("Converting {} → {}", image.display(), output.display());
-            oci2squashfs::convert(&image, &output).await?;
+            oci2squashfs::convert(&image, &output, mksquashfs.as_deref()).await?;
             println!("Done: {}", output.display());
         }
         Commands::Verify {
