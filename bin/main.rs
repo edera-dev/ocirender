@@ -12,7 +12,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Convert an OCI image directory to a squashfs image.
-    Convert {
+    ConvertSquashfs {
         /// Path to the extracted OCI image directory.
         #[arg(short, long)]
         image: PathBuf,
@@ -38,9 +38,9 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Convert { image, output, mksquashfs } => {
+        Commands::ConvertSquashfs { image, output, mksquashfs } => {
             println!("Converting {} → {}", image.display(), output.display());
-            oci2squashfs::convert(&image, &output, mksquashfs.as_deref()).await?;
+            oci2squashfs::convert_mksquashfs(&image, &output, mksquashfs.as_deref()).await?;
             println!("Done: {}", output.display());
         }
         Commands::Verify {
