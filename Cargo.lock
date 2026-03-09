@@ -428,7 +428,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "oci_squashfs"
+name = "oci2squashfs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -445,12 +445,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "oci_squashfs_cli"
+name = "oci2squashfs_cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "oci_squashfs",
+ "oci2squashfs",
  "tokio",
 ]
 

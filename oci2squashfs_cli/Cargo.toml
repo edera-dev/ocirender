@@ -1,5 +1,5 @@
 [package]
-name = "oci_squashfs_cli"
+name = "oci2squashfs_cli"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,7 +8,7 @@ name = "oci2squashfs"
 path = "src/main.rs"
 
 [dependencies]
-oci_squashfs = { path = "../oci_squashfs" }
+oci2squashfs = { path = "../oci2squashfs" }
 tokio         = { version = "1", features = ["full"] }
 clap          = { version = "4", features = ["derive"] }
 anyhow        = "1"

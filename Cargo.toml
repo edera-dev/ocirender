@@ -1,3 +1,3 @@
 [workspace]
-members = ["oci_squashfs", "oci_squashfs_cli"]
+members = ["oci2squashfs", "oci2squashfs_cli"]
 resolver = "2"

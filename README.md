@@ -1,4 +1,4 @@
-# oci_squashfs
+# oci2squashfs
 
 A Rust library and CLI tool for converting OCI container images directly into
 squashfs filesystem images, without extracting layer contents to disk.
@@ -144,7 +144,7 @@ the link is silently dropped.
 ## Project structure
 
 ```
-oci_squashfs/               # Library crate — all reusable logic
+oci2squashfs/               # Library crate — all reusable logic
   src/
     lib.rs                  # Public async convert() entry point
     canonical.rs            # CanonicalTarHeader: USTAR header + PAX extensions
@@ -160,7 +160,7 @@ oci_squashfs/               # Library crate — all reusable logic
     integration.rs          # Synthetic tests for the merge pipeline
     regression.rs           # Per-bug regression tests from production verify runs
 
-oci_squashfs_cli/           # Binary crate — CLI only, depends on the library
+oci2squashfs_cli/           # Binary crate — CLI only, depends on the library
   src/
     main.rs                 # `oci2squashfs convert` and `oci2squashfs verify`
 ```

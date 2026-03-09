@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Convert { image, output } => {
             println!("Converting {} → {}", image.display(), output.display());
-            oci_squashfs::convert(&image, &output).await?;
+            oci2squashfs::convert(&image, &output).await?;
             println!("Done: {}", output.display());
         }
         Commands::Verify {
@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
             reference,
         } => {
             let report = tokio::task::spawn_blocking(move || {
-                oci_squashfs::verify::verify(&squashfs, &reference)
+                oci2squashfs::verify::verify(&squashfs, &reference)
             })
             .await??;
 
