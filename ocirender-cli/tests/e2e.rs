@@ -2,7 +2,9 @@
 //!
 //! These tests require the following binaries to be present on PATH:
 //!   - mksquashfs       (squashfs-tools, >= 4.6)
+//!   - mkfs.erofs       (erofs-utils, >= 1.7.1)
 //!   - squashfuse
+//!   - erofsfuse
 //!   - fusermount or umount
 //!   - umoci
 //!
@@ -32,12 +34,57 @@ use std::{
 };
 use tempfile::TempDir;
 
+// ── output format abstraction ─────────────────────────────────────────────────
+
+/// The filesystem image formats supported by the ocirender CLI.
+///
+/// Used to parameterise helpers and tests that apply equally to all
+/// image-producing output formats, avoiding duplication of test logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Format {
+    Squashfs,
+    Erofs,
+}
+
+impl Format {
+    /// All image formats. Used by tests that need to cover every format.
+    fn all() -> &'static [Format] {
+        &[Format::Squashfs, Format::Erofs]
+    }
+
+    /// The CLI subcommand name for converting to this format.
+    fn convert_subcommand(self) -> &'static str {
+        match self {
+            Format::Squashfs => "convert-squashfs",
+            Format::Erofs => "convert-erofs",
+        }
+    }
+
+    /// The file extension produced by this format.
+    fn extension(self) -> &'static str {
+        match self {
+            Format::Squashfs => "squashfs",
+            Format::Erofs => "erofs",
+        }
+    }
+
+    /// The `--<flag>` name used by `ocirender verify` for this format.
+    fn verify_flag(self) -> &'static str {
+        match self {
+            Format::Squashfs => "--squashfs",
+            Format::Erofs => "--erofs",
+        }
+    }
+}
+
 // ── required-binary checking ──────────────────────────────────────────────────
 
 /// Names and a short description of every external binary we depend on.
 const REQUIRED_BINARIES: &[(&str, &str)] = &[
     ("mksquashfs", "squashfs-tools >= 4.6"),
+    ("mkfs.erofs", "erofs-utils >= 1.7.1"),
     ("squashfuse", "squashfuse"),
+    ("erofsfuse", "erofsfuse"),
     ("umoci", "umoci (OCI image unpacker)"),
 ];
 
@@ -46,8 +93,7 @@ const REQUIRED_BINARIES: &[(&str, &str)] = &[
 fn cli_bin() -> PathBuf {
     // CARGO_BIN_EXE_ocirender is set by Cargo for [[bin]] targets when
     // running tests.
-    let var = env!("CARGO_BIN_EXE_ocirender");
-    PathBuf::from(var)
+    PathBuf::from(env!("CARGO_BIN_EXE_ocirender"))
 }
 
 /// Convenience: return a `Command` pointing at the compiled CLI binary.
@@ -73,8 +119,7 @@ fn require_binaries() {
         }
     }
 
-    let has_unmount = which("fusermount").is_some() || which("umount").is_some();
-    if !has_unmount {
+    if which("fusermount").is_none() && which("umount").is_none() {
         missing.push("  fusermount or umount  (FUSE unmounting)".into());
     }
 
@@ -152,22 +197,23 @@ fn is_root() -> bool {
     unsafe { libc::getuid() == 0 }
 }
 
-/// Run `ocirender convert-squashfs` and return the path to the output file.
-fn convert_squashfs(image_dir: &Path, out_dir: &Path, name: &str) -> PathBuf {
-    let output = out_dir.join(format!("{name}.squashfs"));
-    let status = ocirender()
+/// Run `ocirender convert-<format>` and return the path to the output file.
+fn convert_image(format: Format, image_dir: &Path, out_dir: &Path, name: &str) -> PathBuf {
+    let output = out_dir.join(format!("{name}.{}", format.extension()));
+    let status = Command::new(cli_bin())
         .args([
-            "convert-squashfs",
+            format.convert_subcommand(),
             "--image",
             image_dir.to_str().unwrap(),
             "--output",
             output.to_str().unwrap(),
         ])
         .status()
-        .expect("spawning ocirender convert-squashfs");
+        .unwrap_or_else(|e| panic!("spawning ocirender {}: {e}", format.convert_subcommand()));
     assert!(
         status.success(),
-        "ocirender convert-squashfs failed for {name} (image: {})",
+        "ocirender {} failed for {name} (image: {})",
+        format.convert_subcommand(),
         image_dir.display()
     );
     output
@@ -287,12 +333,18 @@ fn umoci_unpack(oci_dir: &Path, reference_tag: &str, out_dir: &Path, name: &str)
 /// Pass `ignore_ownership: !is_root()` for squashfs-vs-dir comparisons:
 /// non-root directory extraction silently skips `chown`, making uid/gid
 /// mismatches spurious.
-fn verify_squashfs_clean(squashfs: &Path, reference: &Path, ignore_ownership: bool, label: &str) {
+fn verify_clean(
+    format: Format,
+    image: &Path,
+    reference: &Path,
+    ignore_ownership: bool,
+    label: &str,
+) {
     let mut cmd = ocirender();
     cmd.args([
         "verify",
-        "--squashfs",
-        squashfs.to_str().unwrap(),
+        format.verify_flag(),
+        image.to_str().unwrap(),
         "--reference",
         reference.to_str().unwrap(),
     ]);
@@ -302,8 +354,9 @@ fn verify_squashfs_clean(squashfs: &Path, reference: &Path, ignore_ownership: bo
     let status = cmd.status().expect("spawning ocirender verify");
     assert!(
         status.success(),
-        "verify reported differences for {label}\n  squashfs: {}\n  reference: {}",
-        squashfs.display(),
+        "verify reported differences for {label} ({:?})\n  image: {}\n  reference: {}",
+        format,
+        image.display(),
         reference.display()
     );
 }
@@ -335,42 +388,49 @@ fn verify_dir_clean(dir: &Path, reference: &Path, label: &str) {
 fn e2e_oci_layout_convert_and_verify() {
     let fx = get_fixtures();
     let work = TempDir::new().unwrap();
-    let squashfs = convert_squashfs(&fx.oci_layout, work.path(), "oci-layout");
     let reference = umoci_unpack(&fx.oci_layout, "latest", work.path(), "oci-layout");
-    verify_squashfs_clean(&squashfs, &reference, false, "oci-layout");
+    for format in Format::all() {
+        let image = convert_image(*format, &fx.oci_layout, work.path(), "oci-layout");
+        verify_clean(*format, &image, &reference, !is_root(), "oci-layout");
+    }
 }
 
 #[test]
 fn e2e_docker_save_convert_and_verify() {
     let fx = get_fixtures();
     let work = TempDir::new().unwrap();
-    let squashfs = convert_squashfs(&fx.docker_save, work.path(), "docker-save");
     let reference = umoci_unpack(&fx.oci_layout, "latest", work.path(), "docker-save-ref");
-    verify_squashfs_clean(&squashfs, &reference, false, "docker-save");
+    for format in Format::all() {
+        let image = convert_image(*format, &fx.docker_save, work.path(), "docker-save");
+        verify_clean(*format, &image, &reference, !is_root(), "docker-save");
+    }
 }
 
 #[test]
 fn e2e_both_metadata_files_prefers_index_json() {
     let fx = get_fixtures();
     let work = TempDir::new().unwrap();
-    let squashfs = convert_squashfs(&fx.docker_save_both, work.path(), "both");
     let reference = umoci_unpack(&fx.oci_layout, "latest", work.path(), "both-ref");
-    verify_squashfs_clean(
-        &squashfs,
-        &reference,
-        false,
-        "docker-save-both (index.json preferred)",
-    );
+    for format in Format::all() {
+        let image = convert_image(*format, &fx.docker_save_both, work.path(), "both");
+        verify_clean(
+            *format,
+            &image,
+            &reference,
+            !is_root(),
+            "docker-save-both (index.json preferred)",
+        );
+    }
 }
 
 /// Verify that the squashfs root directory has sane permissions (0755, root/root).
 /// A missing root tar entry causes mksquashfs to default to 0777 owned by the
 /// build user.
 #[test]
-fn e2e_root_directory_permissions() {
+fn e2e_squashfs_root_directory_permissions() {
     let fx = get_fixtures();
     let work = TempDir::new().unwrap();
-    let squashfs = convert_squashfs(&fx.oci_layout, work.path(), "root-perms");
+    let squashfs = convert_image(Format::Squashfs, &fx.oci_layout, work.path(), "root-perms");
 
     let out = Command::new("unsquashfs")
         .args(["-lls", squashfs.to_str().unwrap(), "."])
@@ -400,14 +460,19 @@ fn e2e_root_directory_permissions() {
 fn e2e_overlay_semantics_verified() {
     let fx = get_fixtures();
     let work = TempDir::new().unwrap();
-    let squashfs = convert_squashfs(&fx.oci_layout, work.path(), "overlay-semantics");
     let reference = umoci_unpack(
         &fx.oci_layout,
         "latest",
         work.path(),
         "overlay-semantics-ref",
     );
-    verify_squashfs_clean(&squashfs, &reference, false, "overlay semantics");
+    // This is the same convert+verify as the oci-layout test, but we keep it
+    // as a distinct test with a distinct label so failures here are
+    // unambiguously about overlay correctness rather than metadata parsing.
+    for format in Format::all() {
+        let image = convert_image(*format, &fx.oci_layout, work.path(), "overlay-semantics");
+        verify_clean(*format, &image, &reference, !is_root(), "overlay semantics");
+    }
 }
 
 /// Convert OCI → tar and spot-check overlay semantics: expected files present,
@@ -656,19 +721,16 @@ fn fetch_convert_dir_matches_umoci_alpine() {
 /// headers.
 #[test]
 #[cfg(feature = "network")]
-fn fetch_convert_squashfs_matches_umoci_busybox() {
+fn pull_and_verify_busybox() {
     require_binaries();
     let work = TempDir::new().unwrap();
     let (layout, reference) =
         fetch_with_umoci_reference("docker.io/library/busybox:1.36", work.path(), "busybox");
 
-    let squashfs = convert_squashfs(&layout, work.path(), "busybox");
-    verify_squashfs_clean(
-        &squashfs,
-        &reference,
-        !is_root(),
-        "fetch+convert-squashfs vs umoci (busybox:1.36)",
-    );
+    for format in Format::all() {
+        let image = convert_image(*format, &layout, work.path(), "busybox");
+        verify_clean(*format, &image, &reference, !is_root(), "busybox");
+    }
 }
 
 /// `pull --output-dir` output must match umoci's unpacked rootfs for alpine:3.19.
