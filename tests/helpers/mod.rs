@@ -3,6 +3,7 @@
 
 use oci2squashfs::canonical::CanonicalTarHeader;
 use oci2squashfs::image::LayerBlob;
+use oci2squashfs::overlay::normalize_path;
 use std::io::{Cursor, Write};
 use tar::{Archive, Builder, EntryType, Header};
 
@@ -103,6 +104,51 @@ impl LayerBuilder {
         hdr.set_gid(0);
         hdr.set_cksum();
         self.inner.append(&hdr, Cursor::new(b"" as &[u8])).unwrap();
+        self
+    }
+
+    /// Add a FIFO (named pipe) entry.
+    pub fn add_fifo(mut self, path: &str) -> Self {
+        let mut header = tar::Header::new_gnu();
+        header.set_path(path).unwrap();
+        header.set_entry_type(tar::EntryType::Fifo);
+        header.set_size(0);
+        header.set_mode(0o644);
+        header.set_cksum();
+        // Use the low-level append (not append_data) so the header is written
+        // exactly as we built it.
+        self.inner.append(&header, &[] as &[u8]).unwrap();
+        self
+    }
+
+    /// Add a regular file entry whose path is written verbatim into the USTAR
+    /// name field, bypassing the `tar` crate's `set_path` which strips leading
+    /// `./`.  Use this to simulate tarballs produced by `docker save` and
+    /// similar tools that always emit `./`-prefixed paths.
+    ///
+    /// `path` must be ≤ 99 bytes (i.e. fit in the USTAR name field after the
+    /// NUL terminator); this is sufficient for the deduplication tests.
+    pub fn add_file_dotslash(mut self, path: &str, data: &[u8], mode: u32) -> Self {
+        assert!(
+            path.len() <= 99,
+            "add_file_dotslash: path must be ≤ 99 bytes, got {}",
+            path.len()
+        );
+        let mut header = tar::Header::new_gnu();
+        // Write the path directly into the raw USTAR name field (bytes 0..100)
+        // so the ./ prefix is preserved.  set_path() would strip it.
+        {
+            let raw = header.as_mut_bytes();
+            let field = &mut raw[0..100];
+            field.fill(0);
+            let bytes = path.as_bytes();
+            field[..bytes.len()].copy_from_slice(bytes);
+        }
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(data.len() as u64);
+        header.set_mode(mode);
+        header.set_cksum();
+        self.inner.append(&header, data).unwrap();
         self
     }
 
@@ -207,6 +253,67 @@ pub fn hardlink_target_in_tar(tar_bytes: &[u8], link_path: &str) -> Option<Strin
             .ok()
             .flatten()
             .map(|p| p.to_string_lossy().into_owned());
+    }
+    None
+}
+
+/// Read the file at path `path`, returning the file contents in bytes
+pub fn file_contents_in_tar(tar_bytes: &[u8], path: &str) -> Option<Vec<u8>> {
+    let cursor = std::io::Cursor::new(tar_bytes);
+    let mut archive = tar::Archive::new(cursor);
+    let want = std::path::Path::new(path);
+
+    for entry in archive.entries().ok()? {
+        let mut entry = entry.ok()?;
+        let entry_path = entry.path().ok()?.into_owned();
+        let entry_path = normalize_path(&entry_path);
+        if entry_path == want {
+            if entry.header().entry_type().is_file() {
+                let mut buf = Vec::new();
+                std::io::Read::read_to_end(&mut entry, &mut buf).ok()?;
+                return Some(buf);
+            }
+            return None;
+        }
+    }
+
+    None
+}
+
+/// Return the Unix permission bits for the first entry in `tar_bytes` whose
+/// normalised path matches `path`, or `None` if no such entry exists.
+pub fn file_mode_in_tar(tar_bytes: &[u8], path: &str) -> Option<u32> {
+    let mut archive = tar::Archive::new(tar_bytes);
+    for entry in archive.entries().unwrap() {
+        let entry = entry.unwrap();
+        let p = entry.path().unwrap().into_owned();
+        let normalised = p
+            .to_string_lossy()
+            .trim_start_matches("./")
+            .trim_start_matches('/')
+            .to_string();
+        if normalised == path {
+            return Some(entry.header().mode().unwrap());
+        }
+    }
+    None
+}
+
+/// Return the `EntryType` for the first entry in `tar_bytes` whose normalised
+/// path matches `path`, or `None` if no such entry exists.
+pub fn entry_type_in_tar(tar_bytes: &[u8], path: &str) -> Option<tar::EntryType> {
+    let mut archive = tar::Archive::new(tar_bytes);
+    for entry in archive.entries().unwrap() {
+        let entry = entry.unwrap();
+        let p = entry.path().unwrap().into_owned();
+        let normalised = p
+            .to_string_lossy()
+            .trim_start_matches("./")
+            .trim_start_matches('/')
+            .to_string();
+        if normalised == path {
+            return Some(entry.header().entry_type());
+        }
     }
     None
 }
