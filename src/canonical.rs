@@ -1,4 +1,16 @@
-//! CanonicalTarHeader: a tar Header paired with its PAX extensions.
+//! PAX-aware tar header type used throughout the merge pipeline.
+//!
+//! The [`tar`] crate's [`tar::Header`] type exposes only the fixed-width USTAR
+//! fields, which are limited to 100 bytes for paths and link targets. The PAX
+//! extended header format overcomes these limits by prepending a variable-length
+//! key-value block before the main header; values in that block take precedence
+//! over the corresponding truncated USTAR fields.
+//!
+//! [`CanonicalTarHeader`] pairs a [`tar::Header`] with its PAX extensions,
+//! captured together at read time, and provides accessors that always prefer
+//! the PAX value when one is present. Using this type throughout the pipeline
+//! ensures that long paths and long link targets are never accidentally read
+//! from the truncated USTAR fields.
 
 use anyhow::{Result, anyhow};
 use std::borrow::Cow;
@@ -6,13 +18,30 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use tar::{Builder, EntryType, Header};
 
+/// A tar header paired with its PAX extended header key-value pairs.
+///
+/// All path and link-target accessors on this type prefer the PAX value over
+/// the corresponding USTAR field, avoiding silent truncation for values longer
+/// than 100 bytes.
+///
+/// Construct with [`CanonicalTarHeader::from_entry`] while iterating over a
+/// [`tar::Archive`]. The PAX extensions must be captured at that point because
+/// they are part of the entry's data stream and are not accessible after the
+/// entry is consumed.
 #[derive(Clone, Debug)]
 pub struct CanonicalTarHeader {
+    /// The underlying USTAR header block.
     pub header: Header,
+    /// PAX extended header key-value pairs, in the order they appeared in the
+    /// archive. Empty if the entry had no PAX extensions.
     pub pax_extensions: Vec<(String, String)>,
 }
 
 impl CanonicalTarHeader {
+    /// Capture the header and PAX extensions from a tar archive entry.
+    ///
+    /// Must be called before the entry's data is read, since the PAX extension
+    /// block is part of the same data stream.
     pub fn from_entry<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<Self> {
         let header = entry.header().clone();
         let pax_extensions = match entry.pax_extensions() {
@@ -42,10 +71,11 @@ impl CanonicalTarHeader {
     }
 
     /// Return the entry path, preferring the PAX `path` extension over the
-    /// USTAR header field.  This mirrors the PAX-aware treatment of `link_name`
-    /// and is necessary for the same reason: the USTAR name field is limited to
-    /// 100 bytes, so paths longer than that are silently truncated unless the
-    /// full value is recovered from the PAX extension.
+    /// USTAR header field.
+    ///
+    /// The USTAR name field is limited to 100 bytes, so paths longer than that
+    /// are silently truncated in the raw header. The PAX `path` extension
+    /// carries the full value and must be checked first.
     pub fn path(&self) -> Result<Cow<'_, Path>> {
         if let Some((_, v)) = self.pax_extensions.iter().find(|(k, _)| k == "path") {
             return Ok(Cow::Owned(PathBuf::from(v)));
@@ -55,15 +85,20 @@ impl CanonicalTarHeader {
             .map_err(|e| anyhow!("reading path from header: {e}"))
     }
 
+    /// Return the entry type (regular file, directory, symlink, hardlink, etc.).
     pub fn entry_type(&self) -> EntryType {
         self.header.entry_type()
     }
 
     /// Return the link target path, preferring the PAX `linkpath` extension
-    /// over the USTAR header field. This is necessary because `Header::link_name()`
-    /// only reads the raw 100-byte USTAR field and will return a truncated path
-    /// for targets longer than 100 bytes, whereas the PAX extension carries the
-    /// full value.
+    /// over the USTAR header field.
+    ///
+    /// The USTAR linkname field is limited to 100 bytes. The `tar` crate's
+    /// [`tar::Header::link_name`] reads only that field and silently returns a
+    /// truncated path for targets longer than 100 bytes. The PAX `linkpath`
+    /// extension carries the full value and must be checked first.
+    ///
+    /// Returns `Ok(None)` for entry types that have no link target.
     pub fn link_name(&self) -> Result<Option<PathBuf>> {
         // Check PAX extensions first.
         if let Some((_, v)) = self.pax_extensions.iter().find(|(k, _)| k == "linkpath") {
@@ -78,15 +113,21 @@ impl CanonicalTarHeader {
     }
 
     /// Return a clone of this header suitable for emitting a regular file at a
-    /// caller-supplied path (used when promoting a surviving hardlink to a real
-    /// file because its original target was suppressed by a whiteout).
+    /// caller-supplied path.
     ///
-    /// The clone:
-    /// - sets the entry type to `Regular`
-    /// - strips the `path` and `linkpath` PAX extensions (the path is provided
-    ///   externally to `write_to_tar`, so a stale `path` extension would override it)
-    /// - strips `GNU.sparse.*` extensions (we have the full materialised bytes,
-    ///   so the entry is no longer sparse)
+    /// Used when promoting a surviving hardlink to a standalone regular file
+    /// because its original target was suppressed by a whiteout. The clone:
+    ///
+    /// - sets the entry type to [`EntryType::Regular`]
+    /// - strips the `path` and `linkpath` PAX extensions, since the path is
+    ///   supplied externally to [`write_to_tar`] and a stale `path` extension
+    ///   would override it
+    /// - strips `GNU.sparse.*` extensions, since the promoted entry is written
+    ///   from fully materialised bytes and is no longer sparse
+    ///
+    /// All other inode metadata (mode, uid, gid, mtime) is preserved.
+    ///
+    /// [`write_to_tar`]: CanonicalTarHeader::write_to_tar
     pub fn clone_as_regular(&self) -> Self {
         let pax_extensions = self
             .pax_extensions
@@ -106,15 +147,19 @@ impl CanonicalTarHeader {
     /// `target_path`, using `self`'s header for inode metadata (mode, uid,
     /// gid, mtime).
     ///
-    /// Unlike emitting a synthesized hardlink through `write_to_tar`, this
-    /// method handles long paths and long link targets **entirely via PAX
-    /// extensions** and calls `builder.append` directly.  This is required
-    /// because `write_to_tar` uses `append_data`, which for GNU-format headers
-    /// emits a GNU LongName auxiliary entry when the path exceeds 100 bytes.
-    /// That LongName entry is emitted *after* any PAX extensions queued by a
-    /// prior `append_pax_extensions` call, which causes the reader to consume
-    /// the PAX extensions on the LongName entry rather than the main entry —
-    /// silently losing the `linkpath` extension and the hardlink target.
+    /// Long paths and long link targets are handled **entirely via PAX
+    /// extensions** rather than through [`tar::Builder::append_data`]. This is
+    /// required because `append_data` emits a GNU LongName auxiliary entry for
+    /// paths exceeding 100 bytes, and that auxiliary entry is inserted *after*
+    /// any PAX extensions already queued by `append_pax_extensions` — causing
+    /// the reader to consume the PAX extensions against the LongName entry
+    /// rather than the main entry, silently losing the `linkpath` extension and
+    /// dropping the hardlink.
+    ///
+    /// Instead this method writes PAX extensions for `path` and `linkpath`
+    /// only when needed (i.e. when the value exceeds 100 bytes), then calls
+    /// [`tar::Builder::append`] directly with a manually constructed header,
+    /// bypassing the GNU LongName path entirely.
     pub fn write_hardlink_to_tar<W: Write>(
         &self,
         link_path: &Path,
@@ -144,8 +189,9 @@ impl CanonicalTarHeader {
         header.set_entry_type(EntryType::Link);
         header.set_size(0);
 
-        // Write link_path into the USTAR name field (bytes 0..100), truncated.
-        // The PAX `path` extension above carries the full value when needed.
+        // Write link_path into the USTAR name field (bytes 0..100), truncated
+        // to 99 bytes to leave room for a NUL terminator. The PAX `path`
+        // extension above carries the full value when needed.
         {
             let raw = header.as_mut_bytes();
             let field = &mut raw[0..100];
@@ -156,7 +202,9 @@ impl CanonicalTarHeader {
         }
 
         // Write target_path into the USTAR linkname field (bytes 157..257),
-        // truncated.  The PAX `linkpath` extension above carries the full value.
+        // truncated to 100 bytes. The linkname field does not require a NUL
+        // terminator in POSIX, so the full 100 bytes are usable. The PAX
+        // `linkpath` extension above carries the full value when needed.
         {
             let raw = header.as_mut_bytes();
             let field = &mut raw[157..257];
@@ -178,6 +226,15 @@ impl CanonicalTarHeader {
         Ok(())
     }
 
+    /// Write this entry to `builder` at `path`, streaming `data` as the file
+    /// content.
+    ///
+    /// Any PAX extensions stored on this header are emitted before the main
+    /// entry via [`tar::Builder::append_pax_extensions`]. For hardlink entries,
+    /// use [`write_hardlink_to_tar`] instead — see that method's documentation
+    /// for why `append_data` is not suitable for hardlinks with long paths.
+    ///
+    /// [`write_hardlink_to_tar`]: CanonicalTarHeader::write_hardlink_to_tar
     pub fn write_to_tar<W: Write, R: Read>(
         &self,
         path: &Path,

@@ -1,3 +1,38 @@
+//! OCI image conversion library.
+//!
+//! Converts OCI container images into squashfs filesystem images, plain tar
+//! archives, or extracted directories by merging the image's layer tarballs
+//! directly, without extracting them to intermediate disk storage.
+//!
+//! # Concepts
+//!
+//! An OCI image is a stack of compressed tar archives (layers). Converting an
+//! image means applying them oldest-first, with newer layers overwriting older
+//! ones and whiteout files representing deletions. This library implements that
+//! merge as a streaming algorithm: entries flow from the compressed layer blobs
+//! through the overlay logic directly into the chosen output sink.
+//!
+//! The output format and destination are described by [`ImageSpec`], which is
+//! also used as the input source for [`verify::verify`]. The same type is used
+//! in both directions to avoid a parallel set of read vs. write descriptors.
+//!
+//! # Conversion
+//!
+//! For simple one-shot conversions, use [`convert`] or one of its named
+//! convenience wrappers ([`convert_mksquashfs`], [`convert_tar`],
+//! [`convert_dir`]).
+//!
+//! When layers are being downloaded concurrently, use [`StreamingPacker`] or
+//! one of the `_streaming` convenience wrappers. These accept layers in any
+//! arrival order; the merge engine resequences them internally and processes
+//! each layer as soon as its turn arrives, keeping the output sink busy while
+//! remaining layers are still in flight.
+//!
+//! # Verification
+//!
+//! See [`verify::verify`] for comparing a generated image against a reference
+//! directory.
+
 pub mod canonical;
 pub mod dir;
 pub mod image;
@@ -14,20 +49,29 @@ use std::path::{Path, PathBuf};
 
 // ── ImageSpec ─────────────────────────────────────────────────────────────────
 
-/// Describes the format, location, and any format-specific configuration of an
-/// image. Direction-neutral: used both as a conversion output target and as a
-/// verification input source.
+/// Format, location, and format-specific configuration of an image.
+///
+/// Direction-neutral: used both as a conversion output target (by [`convert`]
+/// and [`StreamingPacker`]) and as a verification input source (by
+/// [`verify::verify`]).
 #[derive(Clone, Debug)]
 pub enum ImageSpec {
-    /// A squashfs filesystem image. `binpath` overrides the `mksquashfs` binary
-    /// location when writing; if `None`, `mksquashfs` is resolved from `PATH`.
+    /// A squashfs filesystem image.
+    ///
+    /// `binpath` overrides the `mksquashfs` binary location when writing; if
+    /// `None`, `mksquashfs` is resolved from `PATH`. Ignored when used as a
+    /// verification source.
     Squashfs {
         path: PathBuf,
         binpath: Option<PathBuf>,
     },
     /// A plain tar archive.
+    ///
+    /// Note: [`verify::verify`] does not support tar sources. Extract to a
+    /// directory first with [`convert_dir`], then verify with
+    /// [`ImageSpec::Dir`].
     Tar { path: PathBuf },
-    /// A directory containing the extracted filesystem.
+    /// A directory containing the extracted filesystem tree.
     Dir { path: PathBuf },
 }
 
@@ -42,35 +86,47 @@ impl ImageSpec {
 
 // ── PackerProgress ────────────────────────────────────────────────────────────
 
-/// Progress events emitted by [`StreamingPacker`] and the underlying merge
-/// engine as layers are processed.
+/// Progress events emitted by the merge engine as layers are processed.
 ///
-/// Applies equally to all output formats: the events describe progress through
-/// the overlay merge, which is format-agnostic.
+/// Delivered via the optional `progress_tx` channel supplied to
+/// [`StreamingPacker::new`]. Events are emitted regardless of output format —
+/// they describe progress through the overlay merge, not the output sink.
+///
+/// Note that the caller's channel closes asynchronously after
+/// [`StreamingPacker::finish`] returns; drain with `recv().await` rather than
+/// `try_recv()` to ensure all events are received.
 #[derive(Debug, Clone)]
 pub enum PackerProgress {
-    /// The merge thread has started processing this layer index.
+    /// The merge engine has started processing the layer at this index.
     LayerStarted(usize),
-    /// The merge thread has finished processing this layer index.
+    /// The merge engine has finished processing the layer at this index.
     LayerFinished(usize),
 }
 
 // ── LayerMeta ─────────────────────────────────────────────────────────────────
 
-/// Metadata about a single layer, captured from the manifest before any
-/// downloading begins. Used by [`StreamingPacker`] to reconstruct a
-/// [`LayerBlob`] once the blob file is available on disk.
+/// Manifest-derived metadata for a single layer, captured before downloading
+/// begins.
+///
+/// Passed to [`StreamingPacker::new`] so the packer can reconstruct a
+/// [`LayerBlob`] from each blob file as it arrives on disk via
+/// [`StreamingPacker::notify_layer_ready`].
 #[derive(Clone, Debug)]
 pub struct LayerMeta {
+    /// Zero-based position of this layer in the manifest's layer list.
+    /// Layer 0 is the oldest (base) layer; the highest index is the newest.
     pub index: usize,
+    /// OCI media type of the layer blob, used to select the correct
+    /// decompressor. For example,
+    /// `application/vnd.oci.image.layer.v1.tar+gzip`.
     pub media_type: String,
 }
 
 // ── internal helpers ──────────────────────────────────────────────────────────
 
-/// Load manifest and resolve layer blobs from an OCI image directory,
-/// pre-loading them into a std channel receiver so the batch path can reuse
-/// the streaming merge implementation.
+/// Load the manifest from `image_dir` and pre-load all resolved layer blobs
+/// into a std channel, so the batch conversion path can reuse the streaming
+/// merge implementation without any code duplication.
 fn layers_from_image_dir(
     image_dir: &Path,
 ) -> Result<(std::sync::mpsc::Receiver<Result<LayerBlob>>, usize)> {
@@ -84,12 +140,12 @@ fn layers_from_image_dir(
     Ok((rx, total))
 }
 
-/// Create a paired tokio→std channel bridge for layer delivery.
+/// Create a tokio→std channel bridge for layer delivery.
 ///
-/// Returns a tokio sender for async callers to push `LayerBlob`s into, and a
-/// std receiver to hand off to a `spawn_blocking` merge thread. Spawns a
-/// detached relay task; the std sender is dropped when the tokio channel
-/// closes, which signals EOF to the merge thread.
+/// Returns a tokio sender for async callers to push [`LayerBlob`]s into, and a
+/// std receiver to hand off to a `spawn_blocking` merge thread. Dropping the
+/// tokio sender causes the relay task to exit, which drops the std sender and
+/// signals EOF to the merge thread's `recv` loop.
 fn make_layer_channel(
     cap: usize,
 ) -> (
@@ -102,8 +158,11 @@ fn make_layer_channel(
     (tokio_tx, std_rx)
 }
 
-/// Forward items from a tokio mpsc receiver to a std mpsc sender.
-/// Detached relay task; std sender drop signals EOF to the blocking side.
+/// Relay items from a tokio mpsc receiver to a std mpsc sender.
+///
+/// Runs as a detached task. When the tokio sender is dropped the receiver
+/// returns `None`, the task exits, and the std sender is dropped — signalling
+/// EOF to the blocking merge thread.
 async fn relay_to_blocking(
     mut tokio_rx: tokio::sync::mpsc::Receiver<Result<LayerBlob>>,
     std_tx: std::sync::mpsc::Sender<Result<LayerBlob>>,
@@ -115,9 +174,12 @@ async fn relay_to_blocking(
     }
 }
 
-/// Forward progress events from a std mpsc receiver back into the async world.
-/// Uses an intermediate spawn_blocking so the calling async task is never
-/// blocked waiting on the std receiver.
+/// Relay progress events from a std mpsc receiver back into the async world.
+///
+/// Runs a `spawn_blocking` call internally so the async task is never stalled
+/// on the std `recv`. Events are buffered through an intermediate tokio channel
+/// of capacity 1; the blocking thread and the async relay step proceed
+/// independently with minimal coupling.
 async fn relay_from_blocking(
     std_rx: std::sync::mpsc::Receiver<PackerProgress>,
     tokio_tx: tokio::sync::mpsc::Sender<PackerProgress>,
@@ -137,9 +199,9 @@ async fn relay_from_blocking(
     }
 }
 
-/// Dispatch a std layer receiver to the appropriate write function for the
-/// given `ImageSpec`. This is the single point where format selection happens
-/// in the blocking world.
+/// Single dispatch point from an [`ImageSpec`] to the appropriate blocking
+/// write function. All conversion paths — batch and streaming, sync and async
+/// — converge here.
 fn write_for_spec(
     receiver: std::sync::mpsc::Receiver<Result<LayerBlob>>,
     total_layers: usize,
@@ -167,6 +229,9 @@ fn write_for_spec(
 
 /// Convert an OCI image directory into the format and location described by
 /// `spec`.
+///
+/// All layers are resolved from disk before conversion begins. For concurrent
+/// download-and-convert workflows, use [`StreamingPacker`] instead.
 pub async fn convert(image_dir: &Path, spec: ImageSpec) -> Result<()> {
     let image_dir = image_dir.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -179,6 +244,8 @@ pub async fn convert(image_dir: &Path, spec: ImageSpec) -> Result<()> {
 // ── Batch compatibility wrappers ──────────────────────────────────────────────
 
 /// Convert an OCI image directory into a squashfs file.
+///
+/// Convenience wrapper around [`convert`] with [`ImageSpec::Squashfs`].
 pub async fn convert_mksquashfs(
     image_dir: &Path,
     output_squashfs: &Path,
@@ -195,6 +262,8 @@ pub async fn convert_mksquashfs(
 }
 
 /// Convert an OCI image directory into a plain tar file.
+///
+/// Convenience wrapper around [`convert`] with [`ImageSpec::Tar`].
 pub async fn convert_tar(image_dir: &Path, output_tar: &Path) -> Result<()> {
     convert(
         image_dir,
@@ -206,6 +275,8 @@ pub async fn convert_tar(image_dir: &Path, output_tar: &Path) -> Result<()> {
 }
 
 /// Extract an OCI image directory directly into `output_dir`.
+///
+/// Convenience wrapper around [`convert`] with [`ImageSpec::Dir`].
 pub async fn convert_dir(image_dir: &Path, output_dir: &Path) -> Result<()> {
     convert(
         image_dir,
@@ -219,6 +290,10 @@ pub async fn convert_dir(image_dir: &Path, output_dir: &Path) -> Result<()> {
 // ── Streaming compatibility wrappers ─────────────────────────────────────────
 
 /// Streaming variant of [`convert_mksquashfs`].
+///
+/// Layers are delivered via `receiver` as downloads complete, in any order.
+/// A download error sent as `Err` aborts the merge and cleans up the partial
+/// output file.
 pub async fn convert_mksquashfs_streaming(
     receiver: tokio::sync::mpsc::Receiver<Result<LayerBlob>>,
     total_layers: usize,
@@ -235,6 +310,8 @@ pub async fn convert_mksquashfs_streaming(
 }
 
 /// Streaming variant of [`convert_tar`].
+///
+/// On error the partially written output file is removed.
 pub async fn convert_tar_streaming(
     receiver: tokio::sync::mpsc::Receiver<Result<LayerBlob>>,
     total_layers: usize,
@@ -249,6 +326,9 @@ pub async fn convert_tar_streaming(
 }
 
 /// Streaming variant of [`convert_dir`].
+///
+/// On error the partially populated output directory is left in place —
+/// callers are responsible for cleanup.
 pub async fn convert_dir_streaming(
     receiver: tokio::sync::mpsc::Receiver<Result<LayerBlob>>,
     total_layers: usize,
@@ -264,27 +344,72 @@ pub async fn convert_dir_streaming(
 
 // ── StreamingPacker ───────────────────────────────────────────────────────────
 
-/// A streaming packer that accepts layers in any order as they finish
-/// downloading and writes to any output format supported by [`ImageSpec`].
+/// A streaming image packer that accepts layers in any order as downloads
+/// complete.
 ///
-/// Progress notifications are delivered via an optional
-/// `tokio::sync::mpsc::Sender<PackerProgress>`. The blocking merge thread uses
-/// a `std::sync::mpsc` channel internally and never touches the tokio runtime;
-/// a relay task bridges events back into async land.
+/// Layers are resequenced internally and processed newest-first as each one
+/// arrives, keeping the output sink busy without waiting for all downloads to
+/// finish. Supports all output formats via [`ImageSpec`].
+///
+/// # Download ordering
+///
+/// The merge engine processes layers in strict descending index order: it
+/// cannot begin processing layer N until layer N+1 is complete. A layer that
+/// arrives early has its path held in a waiting queue until its turn comes.
+///
+/// To minimise buffering and keep the output sink as busy as possible,
+/// initiate downloads in descending index order (highest index — i.e. the
+/// newest layer — first) and keep the number of concurrent downloads small.
+/// Fetching all layers in parallel may cause lower-indexed layers to finish
+/// and sit in the queue while the engine is blocked waiting for a
+/// higher-indexed one that is still in flight.
+///
+/// # Usage
+///
+/// ```no_run
+/// # use oci2squashfs::{StreamingPacker, LayerMeta, ImageSpec};
+/// # use std::path::PathBuf;
+/// # async fn example() -> anyhow::Result<()> {
+/// let metas: Vec<LayerMeta> = /* from manifest */ # vec![];
+/// let packer = StreamingPacker::new(
+///     metas,
+///     ImageSpec::Squashfs { path: "out.squashfs".into(), binpath: None },
+///     None,
+/// );
+///
+/// // Call from any task as blobs finish downloading, in any order.
+/// packer.notify_layer_ready(0, PathBuf::from("/tmp/layer0.tar.gz")).await?;
+/// packer.notify_layer_ready(2, PathBuf::from("/tmp/layer2.tar.gz")).await?;
+/// packer.notify_layer_ready(1, PathBuf::from("/tmp/layer1.tar.gz")).await?;
+///
+/// packer.finish().await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct StreamingPacker {
+    /// Tokio sender end of the layer delivery channel. Dropped in `finish()`
+    /// to signal EOF to the relay task and, transitively, the merge thread.
     layer_tx: tokio::sync::mpsc::Sender<Result<LayerBlob>>,
+    /// Per-layer metadata indexed by manifest position, used to reconstruct
+    /// a [`LayerBlob`] from a bare file path in `notify_layer_ready`.
     metas: Vec<LayerMeta>,
+    /// Handle to the `spawn_blocking` task running the merge and output sink.
     task: tokio::task::JoinHandle<Result<()>>,
 }
 
 impl StreamingPacker {
     /// Construct a `StreamingPacker` and immediately begin processing.
     ///
-    /// `spec` determines the output format, path, and any format-specific
-    /// options (e.g. `mksquashfs` binary path).
-    /// `layer_metas` must contain one entry per layer in manifest order.
-    /// `progress_tx`, if supplied, receives layer events as the merge thread
-    /// processes them. Send failures are silently ignored.
+    /// The output sink is opened and any required subprocess (e.g.
+    /// `mksquashfs` for [`ImageSpec::Squashfs`]) is spawned at construction
+    /// time. `layer_metas` must contain one entry per layer in manifest order.
+    ///
+    /// `progress_tx`, if supplied, receives [`PackerProgress`] events from the
+    /// merge engine as each layer is processed. The channel closes
+    /// asynchronously after [`finish`] returns; drain with `recv().await` to
+    /// ensure all events are received before inspecting them.
+    ///
+    /// [`finish`]: StreamingPacker::finish
     pub fn new(
         layer_metas: Vec<LayerMeta>,
         spec: ImageSpec,
@@ -312,11 +437,15 @@ impl StreamingPacker {
         }
     }
 
-    /// Notify the packer that a layer blob has finished downloading.
+    /// Notify the packer that the layer blob at `index` has finished
+    /// downloading and is available at `path`.
     ///
     /// May be called from any task in any order. Returns an error only if the
-    /// internal channel has closed, indicating the packer has already hit a
-    /// fatal error — callers should stop sending and propagate.
+    /// internal channel has already closed, which means the merge thread has
+    /// hit a fatal error. In that case callers should stop sending and
+    /// propagate the error from [`finish`].
+    ///
+    /// [`finish`]: StreamingPacker::finish
     pub async fn notify_layer_ready(&self, index: usize, path: PathBuf) -> Result<()> {
         let meta = self.metas.get(index).ok_or_else(|| {
             anyhow::anyhow!(
@@ -335,18 +464,29 @@ impl StreamingPacker {
             .map_err(|_| anyhow::anyhow!("packer channel closed unexpectedly"))
     }
 
-    /// Signal a download error to the packer, causing the merge to abort.
-    /// After calling this, `finish()` will return an error.
+    /// Signal a download failure to the packer, causing the merge to abort.
+    ///
+    /// After calling this, [`finish`] will return an error. Best-effort: if
+    /// the merge has already failed and the channel is closed, this is a
+    /// no-op.
+    ///
+    /// [`finish`]: StreamingPacker::finish
     pub async fn notify_error(&self, err: anyhow::Error) {
         let _ = self.layer_tx.send(Err(err)).await;
     }
 
-    /// Wait for the output to be finalised and return the result.
+    /// Wait for all output to be finalised and return the result.
     ///
-    /// Must be called after all `notify_layer_ready` / `notify_error` calls.
+    /// Must be called after all [`notify_layer_ready`] and [`notify_error`]
+    /// calls. Dropping the packer without calling `finish` will leave the
+    /// merge task running until the internal channel closes naturally.
+    ///
+    /// [`notify_layer_ready`]: StreamingPacker::notify_layer_ready
+    /// [`notify_error`]: StreamingPacker::notify_error
     pub async fn finish(self) -> Result<()> {
-        // Drop the sender so the relay task sees EOF and closes the std
-        // channel, unblocking the merge thread's recv loop.
+        // Dropping the sender causes relay_to_blocking to see EOF on the tokio
+        // receiver, which exits the relay task and drops the std sender,
+        // unblocking the merge thread's recv loop.
         drop(self.layer_tx);
         self.task.await?
     }
