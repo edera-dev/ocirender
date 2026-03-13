@@ -1,0 +1,43 @@
+name: Quality gate
+description: >
+  Full pre-release quality checks: formatting, lints, docs, security
+  advisories, and the complete test suite (including e2e).
+  Add cargo-deny with a deny.toml for license/ban checking when ready.
+
+runs:
+  using: composite
+  steps:
+    - name: Install test suite dependencies
+      shell: bash
+      run: |
+        sudo -E bash -c '
+          export DEBIAN_FRONTEND=noninteractive
+          apt update
+          apt -y install squashfs-tools squashfuse umoci
+        '
+
+    - name: Install cargo-audit
+      shell: bash
+      run: cargo install cargo-audit --locked
+
+    - name: cargo fmt
+      shell: bash
+      run: cargo fmt --all -- --check
+
+    - name: cargo clippy
+      shell: bash
+      run: cargo clippy -- -D warnings
+
+    - name: cargo doc
+      shell: bash
+      env:
+        RUSTDOCFLAGS: "-D warnings"
+      run: cargo doc --no-deps
+
+    - name: cargo audit
+      shell: bash
+      run: cargo audit
+
+    - name: cargo test
+      shell: bash
+      run: cargo test --features e2e

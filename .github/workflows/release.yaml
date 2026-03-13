@@ -1,0 +1,97 @@
+name: Release ocirender
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  release-plz-release:
+    if: ${{ github.repository_owner == 'edera-dev' }}
+    name: Release-plz release
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@5ef0c079ce82195b2a36a210272d6b661572d83e # v2.14.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Generate cultivator token
+        uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2.2.1
+        id: generate-token
+        with:
+          app-id: "${{ secrets.EDERA_CULTIVATION_APP_ID }}"
+          private-key: "${{ secrets.EDERA_CULTIVATION_APP_PRIVATE_KEY }}"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # zizmor: ignore[stale-action-refs]
+        with:
+          components: rustfmt, clippy
+
+      - name: Quality gate
+        uses: ./.github/actions/quality-gate
+
+      - name: Run release-plz
+        uses: release-plz/action@f708778669256143d984cce4b23592637532e040 # v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: "${{ steps.generate-token.outputs.token }}"
+          CARGO_REGISTRY_TOKEN: "${{ secrets.CARGO_REGISTRY_TOKEN }}"
+
+  release-plz-pr:
+    if: ${{ github.repository_owner == 'edera-dev' }}
+    name: Release-plz PR
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@5ef0c079ce82195b2a36a210272d6b661572d83e # v2.14.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # zizmor: ignore[stale-action-refs]
+        with:
+          components: rustfmt, clippy
+
+      - name: Generate cultivator token
+        uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2.2.1
+        id: generate-token
+        with:
+          app-id: "${{ secrets.EDERA_CULTIVATION_APP_ID }}"
+          private-key: "${{ secrets.EDERA_CULTIVATION_APP_PRIVATE_KEY }}"
+
+      - name: Run release-plz
+        uses: release-plz/action@f708778669256143d984cce4b23592637532e040 # v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: "${{ steps.generate-token.outputs.token }}"
+          CARGO_REGISTRY_TOKEN: "${{ secrets.CARGO_REGISTRY_TOKEN }}"
