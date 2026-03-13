@@ -43,14 +43,14 @@ pub fn write_dir_with_progress(
 
     // The IIFE captures the unpack result without an early return, ensuring
     // merge_handle.join() is always called regardless of whether unpack fails.
-    let unpack_result = (|| {
+    let unpack_result = {
         let mut archive = tar::Archive::new(reader);
         archive.set_preserve_permissions(true);
         archive.set_preserve_mtime(true);
         archive
             .unpack(output_dir)
             .context("unpacking merged tar into output directory")
-    })();
+    };
 
     let merge_result = merge_handle.join().expect("merge thread panicked");
 

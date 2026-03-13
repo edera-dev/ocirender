@@ -104,13 +104,13 @@ impl WhiteoutTracker {
                 None => return false,
             }
             // At the terminal component, check the node itself.
-            if i == components.len() - 1 {
-                if let Some(state) = &node.state {
-                    match state {
-                        WhiteoutState::Simple { layer_index }
-                        | WhiteoutState::Opaque { layer_index } => {
-                            return current_layer < *layer_index;
-                        }
+            if i == components.len() - 1
+                && let Some(state) = &node.state
+            {
+                match state {
+                    WhiteoutState::Simple { layer_index }
+                    | WhiteoutState::Opaque { layer_index } => {
+                        return current_layer < *layer_index;
                     }
                 }
             }

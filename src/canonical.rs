@@ -220,7 +220,7 @@ impl CanonicalTarHeader {
         // attempt to re-encode the path via GNU LongName, which would be
         // emitted between the already-queued PAX extensions and the main entry.
         builder
-            .append(&mut header, &[] as &[u8])
+            .append(&header, &[] as &[u8])
             .map_err(|e| anyhow!("failed to append hardlink entry: {e}"))?;
 
         Ok(())
