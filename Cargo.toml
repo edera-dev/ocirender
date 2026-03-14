@@ -3,6 +3,14 @@ members = [ ".", "ocirender-cli" ]
 default-members = [ ".", "ocirender-cli" ]
 resolver = "3"
 
+# Compile all dependencies at opt-level 3 even in debug builds.
+# This makes crypto (sha2), compression (zstd, flate2, bzip2, xz2), and
+# the tar parser run at full speed without requiring `--release` for the
+# entire build.  First build is slower; incremental rebuilds of your own
+# code are unaffected since only dependency crates are recompiled.
+[profile.dev.package."*"]
+opt-level = 3
+
 [package]
 name        = "ocirender"
 description = "Stream and merge OCI image layers into squashfs, tar, or directory output"
