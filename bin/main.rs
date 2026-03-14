@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use ocirender::ImageSpec;
 
 #[derive(Parser)]
-#[command(name = "ocirender", about = "Convert an OCI image to squashfs")]
+#[command(name = "ocirender", about = "OCI container image rendering and verification")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
