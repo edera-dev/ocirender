@@ -1,47 +1,37 @@
-[package]
-name = "ocirender"
-description = "Stream and merge OCI image layers into squashfs, tar, or directory output"
-license = "Apache-2.0"
-version = "0.1.2"
-homepage = "https://github.com/edera-dev/ocirender"
-repository = "https://github.com/edera-dev/ocirender"
-edition = "2024"
+[workspace]
+members = [ ".", "ocirender-cli" ]
+default-members = [ ".", "ocirender-cli" ]
+resolver = "3"
 
-[features]
-# Enables end-to-end tests that invoke the compiled CLI binary, mksquashfs,
-# squashfuse, and umoci. These are never compiled into the library or CLI
-# themselves — the feature only gates code inside [[test]] targets.
-#
-# Usage: cargo test --features e2e --test e2e
-e2e = []
+[package]
+name        = "ocirender"
+description = "Stream and merge OCI image layers into squashfs, tar, or directory output"
+license     = "Apache-2.0"
+version     = "0.1.2"
+homepage    = "https://github.com/edera-dev/ocirender"
+repository  = "https://github.com/edera-dev/ocirender"
+edition     = "2024"
 
 [dependencies]
-anyhow        = "1"
-bzip2         = "0.6"
-clap          = { version = "4", features = ["derive"] }
-flate2        = { version = "1", features = ["zlib-rs"], default-features = false }
-serde         = { version = "1", features = ["derive"] }
-serde_json    = "1"
-sha2          = "0.10"
-tar           = "0.4"
-tempfile      = "3"
-tokio         = { version = "1", features = ["full"] }
-xz2           = "0.1"
-zstd          = "0.13"
+anyhow     = "1"
+bzip2      = "0.6"
+flate2     = { version = "1", features = ["zlib-rs"], default-features = false }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2       = "0.10"
+tar        = "0.4"
+tempfile   = "3"
+tokio      = { version = "1", features = ["rt", "sync"] }
+xz2        = "0.1"
+zstd       = "0.13"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full"] }
-libc  = "0.2"
+tokio    = { version = "1", features = ["full"] }
+libc     = "0.2"
 oci-spec = { version = "0.9", features = ["image"] }
+
+[patch.crates-io]
+indicatif = { git = "https://github.com/edera-dev/indicatif.git", rev = "51e3a390b5d64ca8ab86044e578e2bb2bfe718a1" }
 
 [lib]
 name = "ocirender"
-
-[[bin]]
-name = "ocirender"
-path = "bin/main.rs"
-
-[[test]]
-name = "e2e"
-path = "tests/e2e.rs"
-required-features = ["e2e"]

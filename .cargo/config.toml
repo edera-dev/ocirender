@@ -1,0 +1,8 @@
+[alias]
+# Run the local-fixture e2e tests (no network access required).
+#   cargo test-e2e
+test-e2e     = "test --features ocirender-cli/e2e"
+
+# Run all e2e tests including those that contact real registries.
+#   cargo test-network
+test-network = "test --features ocirender-cli/e2e,ocirender-cli/network"

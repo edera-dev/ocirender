@@ -122,13 +122,19 @@ pub struct FileDiff {
 /// - [`ImageSpec::Tar`]: returns `Err`. Tar archives cannot be compared
 ///   directly — extract to a directory with `convert-dir` first, then verify
 ///   with [`ImageSpec::Dir`].
-pub fn verify(spec: ImageSpec, reference: &Path) -> Result<VerifyReport> {
+///
+/// If `ignore_ownership` is `true`, uid and gid differences are not recorded.
+/// This is appropriate when comparing a squashfs image (which preserves
+/// ownership from tar headers) against a directory extracted as a non-root
+/// user (where `chown` silently fails, leaving all files owned by the
+/// invoking user).
+pub fn verify(spec: ImageSpec, reference: &Path, ignore_ownership: bool) -> Result<VerifyReport> {
     match spec {
         ImageSpec::Squashfs { path, .. } => {
             let mount = SquashMount::new(&path)?;
-            verify_dirs(mount.path(), reference)
+            verify_dirs(mount.path(), reference, ignore_ownership)
         }
-        ImageSpec::Dir { path } => verify_dirs(&path, reference),
+        ImageSpec::Dir { path } => verify_dirs(&path, reference, ignore_ownership),
         ImageSpec::Tar { .. } => anyhow::bail!(
             "tar verification is not supported directly; \
              extract to a directory with convert-dir first, then use --dir"
@@ -142,7 +148,13 @@ pub fn verify(spec: ImageSpec, reference: &Path) -> Result<VerifyReport> {
 /// resolving the generated image to a directory (mounting it if necessary).
 /// All differences are collected before returning; the function does not
 /// short-circuit on the first mismatch.
-pub(crate) fn verify_dirs(generated: &Path, reference: &Path) -> Result<VerifyReport> {
+///
+/// If `ignore_ownership` is `true`, uid and gid differences are not recorded.
+pub(crate) fn verify_dirs(
+    generated: &Path,
+    reference: &Path,
+    ignore_ownership: bool,
+) -> Result<VerifyReport> {
     let generated_tree = walk_tree(generated).context("walking generated directory")?;
     let reference_tree = walk_tree(reference).context("walking reference directory")?;
 
@@ -155,9 +167,12 @@ pub(crate) fn verify_dirs(generated: &Path, reference: &Path) -> Result<VerifyRe
     for (rel, gen_info) in &generated_tree {
         match reference_tree.get(rel) {
             None => report.only_in_generated.push(rel.clone()),
-            Some(ref_info) => report
-                .differences
-                .extend(compare_entries(rel, gen_info, ref_info)),
+            Some(ref_info) => report.differences.extend(compare_entries(
+                rel,
+                gen_info,
+                ref_info,
+                ignore_ownership,
+            )),
         }
     }
     for rel in reference_tree.keys() {
@@ -280,7 +295,12 @@ fn hash_file(path: &Path) -> Result<String> {
 /// If the entry types differ, a single type-mismatch diff is returned and
 /// further attribute comparison is skipped — mode, uid, etc. are meaningless
 /// across a type boundary.
-fn compare_entries(rel: &Path, generated: &EntryInfo, reference: &EntryInfo) -> Vec<FileDiff> {
+fn compare_entries(
+    rel: &Path,
+    generated: &EntryInfo,
+    reference: &EntryInfo,
+    ignore_ownership: bool,
+) -> Vec<FileDiff> {
     let mut diffs = Vec::new();
     macro_rules! diff {
         ($msg:expr) => {
@@ -304,17 +324,19 @@ fn compare_entries(rel: &Path, generated: &EntryInfo, reference: &EntryInfo) -> 
             generated.mode, reference.mode
         ));
     }
-    if generated.uid != reference.uid {
-        diff!(format!(
-            "uid: generated={} reference={}",
-            generated.uid, reference.uid
-        ));
-    }
-    if generated.gid != reference.gid {
-        diff!(format!(
-            "gid: generated={} reference={}",
-            generated.gid, reference.gid
-        ));
+    if !ignore_ownership {
+        if generated.uid != reference.uid {
+            diff!(format!(
+                "uid: generated={} reference={}",
+                generated.uid, reference.uid
+            ));
+        }
+        if generated.gid != reference.gid {
+            diff!(format!(
+                "gid: generated={} reference={}",
+                generated.gid, reference.gid
+            ));
+        }
     }
     if generated.symlink_target != reference.symlink_target {
         diff!(format!(

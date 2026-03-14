@@ -40,4 +40,4 @@ runs:
 
     - name: cargo test
       shell: bash
-      run: cargo test --features e2e
+      run: cargo test-network
