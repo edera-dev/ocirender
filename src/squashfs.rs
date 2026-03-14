@@ -73,13 +73,22 @@ pub fn write_squashfs_with_progress(
 
     if merge_result.is_err() {
         let _ = std::fs::remove_file(output);
+        let stderr = String::from_utf8_lossy(&exit.stderr);
+        if !exit.status.success() && !stderr.is_empty() {
+            return merge_result
+                .context(format!(
+                    "mksquashfs failed (status={}):\n{stderr}",
+                    exit.status
+                ))
+                .context("merging layers into mksquashfs stdin");
+        }
         return merge_result.context("merging layers into mksquashfs stdin");
     }
 
     if !exit.status.success() {
         let _ = std::fs::remove_file(output);
         let stderr = String::from_utf8_lossy(&exit.stderr);
-        bail!("mksquashfs failed:\n{stderr}");
+        bail!("mksquashfs failed (status={}):\n{stderr}", exit.status);
     }
 
     Ok(())
