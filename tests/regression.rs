@@ -257,3 +257,68 @@ fn regress_simple_whiteout_suppresses_directory_children() {
         "children of whited-out directory must not appear"
     );
 }
+
+/// Bug: `load_manifest_blob` only recognised OCI media type strings
+/// (`application/vnd.oci.image.index.v1+json` and `...manifest.v1+json`).
+/// `crane pull --format=oci` produces `index.json` entries typed as Docker
+/// distribution media types (`manifest.list.v2+json` / `manifest.v2+json`).
+/// The unrecognised type fell through to "direct single-image manifest" and
+/// tried to deserialise a manifest list as an `OciManifest`, failing with
+/// "missing field `layers`".
+#[test]
+fn regress_docker_manifest_list_media_types() {
+    let dir = tempfile::tempdir().unwrap();
+    let blobs = dir.path().join("blobs").join("sha256");
+    fs::create_dir_all(&blobs).unwrap();
+
+    // A minimal layer blob.
+    let layer_digest = "a".repeat(64);
+    let layer_bytes = LayerBuilder::new()
+        .add_file("etc/os-release", b"data", 0o644)
+        .finish();
+    fs::write(blobs.join(&layer_digest), &layer_bytes).unwrap();
+
+    // Per-platform manifest using the Docker v2 manifest media type.
+    let inner_digest = "b".repeat(64);
+    let inner_manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+        "layers": [{
+            "mediaType": "application/vnd.oci.image.layer.v1.tar",
+            "digest": format!("sha256:{layer_digest}"),
+            "size": layer_bytes.len()
+        }]
+    });
+    fs::write(blobs.join(&inner_digest), inner_manifest.to_string()).unwrap();
+
+    // Manifest list using the Docker manifest list media type.
+    let list_digest = "c".repeat(64);
+    let manifest_list = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+        "manifests": [{
+            "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+            "digest": format!("sha256:{inner_digest}"),
+            "size": inner_manifest.to_string().len()
+        }]
+    });
+    fs::write(blobs.join(&list_digest), manifest_list.to_string()).unwrap();
+
+    // index.json points at the manifest list with the Docker media type.
+    let index_json = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [{
+            "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+            "digest": format!("sha256:{list_digest}"),
+            "size": manifest_list.to_string().len()
+        }]
+    });
+    fs::write(dir.path().join("index.json"), index_json.to_string()).unwrap();
+
+    let manifest = ocirender::image::load_manifest(dir.path())
+        .expect("must handle Docker distribution manifest list media types");
+    let layers = ocirender::image::resolve_layers(dir.path(), &manifest)
+        .expect("must resolve layer from Docker-typed manifest");
+    assert_eq!(layers.len(), 1, "exactly one layer must be resolved");
+}

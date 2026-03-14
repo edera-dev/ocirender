@@ -68,6 +68,19 @@ pub struct LayerBlob {
 const MEDIA_TYPE_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 const MEDIA_TYPE_INDEX: &str = "application/vnd.oci.image.index.v1+json";
 
+// Docker distribution equivalents — same semantics, different type strings.
+const MEDIA_TYPE_DOCKER_MANIFEST: &str = "application/vnd.docker.distribution.manifest.v2+json";
+const MEDIA_TYPE_DOCKER_MANIFEST_LIST: &str =
+    "application/vnd.docker.distribution.manifest.list.v2+json";
+
+fn is_index_media_type(mt: &str) -> bool {
+    mt == MEDIA_TYPE_INDEX || mt == MEDIA_TYPE_DOCKER_MANIFEST_LIST
+}
+
+fn is_manifest_media_type(mt: &str) -> bool {
+    mt == MEDIA_TYPE_MANIFEST || mt == MEDIA_TYPE_DOCKER_MANIFEST
+}
+
 /// Detect the compression format of a layer blob by inspecting its magic bytes.
 ///
 /// Used as a fallback when the manifest does not carry a `mediaType` for a
@@ -197,18 +210,17 @@ fn load_manifest_blob(image_dir: &Path, desc: &OciDescriptor) -> Result<OciManif
     let data = std::fs::read_to_string(&path)
         .with_context(|| format!("reading manifest blob {}", path.display()))?;
 
-    if desc.media_type == MEDIA_TYPE_INDEX {
+    if is_index_media_type(&desc.media_type) {
         let nested: OciIndex = serde_json::from_str(&data)
             .with_context(|| format!("parsing nested index blob {}", path.display()))?;
 
         let inner = nested
             .manifests
             .into_iter()
-            .find(|d| d.media_type == MEDIA_TYPE_MANIFEST)
+            .find(|d| is_manifest_media_type(&d.media_type))
             .with_context(|| {
                 format!(
-                    "nested index at {} contains no single-image manifest entry \
-                     (mediaType {MEDIA_TYPE_MANIFEST})",
+                    "nested index at {} contains no single-image manifest entry",
                     path.display()
                 )
             })?;
