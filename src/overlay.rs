@@ -69,9 +69,9 @@ fn process_layer<W: Write>(
         let raw_path = entry.path().context("entry path")?.into_owned();
         let path = normalize_path(&raw_path);
 
-        // Skip the root directory entry (`./` or `/`), which normalises to an
-        // empty path and is meaningless in a merged tar.
-        if path.as_os_str().is_empty() {
+        // Skip the root directory entry (`./`, `/`, or `.`), which normalises
+        // to an empty path or `.` and is meaningless in a merged tar.
+        if path.as_os_str().is_empty() || path == Path::new(".") {
             continue;
         }
 

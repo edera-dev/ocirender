@@ -322,3 +322,51 @@ fn regress_docker_manifest_list_media_types() {
         .expect("must resolve layer from Docker-typed manifest");
     assert_eq!(layers.len(), 1, "exactly one layer must be resolved");
 }
+
+/// Bug: `normalize_path` stripped leading `./` but not a bare `.`. Some layer
+/// tarballs emit a standalone `.` entry for the root directory. It passed the
+/// empty-path skip in `process_layer` (since `Path::new(".").as_os_str()` is
+/// not empty), was emitted into the output tar, and caused mksquashfs to die
+/// with "Tar pathname can't have '.' or '..' in it".
+#[test]
+fn regress_bare_dot_root_entry_skipped() {
+    let mut builder = Builder::new(Vec::new());
+
+    // Bare `.` root directory entry — the offending form.
+    let mut dot_hdr = Header::new_ustar();
+    dot_hdr.set_path(".").unwrap();
+    dot_hdr.set_entry_type(EntryType::Directory);
+    dot_hdr.set_size(0);
+    dot_hdr.set_mode(0o755);
+    dot_hdr.set_mtime(0);
+    dot_hdr.set_uid(0);
+    dot_hdr.set_gid(0);
+    dot_hdr.set_cksum();
+    builder.append(&dot_hdr, Cursor::new(b"")).unwrap();
+
+    // A real file that must still appear in the output.
+    let mut file_hdr = Header::new_ustar();
+    file_hdr.set_path("sbin/mkswap").unwrap();
+    file_hdr.set_size(4);
+    file_hdr.set_mode(0o755);
+    file_hdr.set_mtime(0);
+    file_hdr.set_uid(0);
+    file_hdr.set_gid(0);
+    file_hdr.set_cksum();
+    builder.append(&file_hdr, Cursor::new(b"data")).unwrap();
+
+    builder.finish().unwrap();
+    let layer = builder.into_inner().unwrap();
+
+    let merged = merge(vec![blob(layer, 0)]);
+    let paths = paths_in_tar(&merged);
+
+    assert!(
+        !paths.iter().any(|p| p == "."),
+        "bare `.` root entry must be skipped; got paths {paths:?}"
+    );
+    assert!(
+        paths.iter().any(|p| p == "sbin/mkswap"),
+        "real file following the `.` entry must still be emitted"
+    );
+}
