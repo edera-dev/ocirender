@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/edera-dev/ocirender/compare/v0.1.1...v0.1.2) - 2026-03-14
+
+### Fixed
+
+- *(overlay)* handle top-level `.` directory entry
+- *(squashfs)* capture stderr from squashfs in error output
+- *(image)* handle docker-centric media types for manifests
+
+### Other
+
+- Merge pull request #4 from edera-dev/dependabot/github_actions/step-security/harden-runner-2.15.1
+- *(deps)* bump step-security/harden-runner from 2.14.2 to 2.15.1
+
 ## [0.1.1](https://github.com/edera-dev/ocirender/compare/v0.1.0...v0.1.1) - 2026-03-13
 
 ### Other
