@@ -11,6 +11,15 @@
 //! the PAX value when one is present. Using this type throughout the pipeline
 //! ensures that long paths and long link targets are never accidentally read
 //! from the truncated USTAR fields.
+//!
+//! ## PAX value encoding
+//!
+//! POSIX specifies PAX values as UTF-8, but real-world images routinely
+//! violate this for binary xattr payloads (most commonly
+//! `SCHILY.xattr.security.capability`, which contains a raw `vfs_cap_data`
+//! struct).  We therefore store all PAX values as raw `Vec<u8>` and decode
+//! to UTF-8 only for the two keys we semantically interpret (`path` and
+//! `linkpath`).  All other values are re-emitted verbatim so no data is lost.
 
 use anyhow::{Result, anyhow};
 use std::borrow::Cow;
@@ -28,13 +37,19 @@ use tar::{Builder, EntryType, Header};
 /// [`tar::Archive`]. The PAX extensions must be captured at that point because
 /// they are part of the entry's data stream and are not accessible after the
 /// entry is consumed.
+///
+/// PAX values are stored as raw bytes (`Vec<u8>`) rather than `String` because
+/// some tools write non-UTF-8 payloads into PAX extensions (e.g.
+/// `SCHILY.xattr.security.capability` contains a binary capability struct).
+/// Only `path` and `linkpath` values are decoded to UTF-8; all others are
+/// passed through opaquely.
 #[derive(Clone, Debug)]
 pub struct CanonicalTarHeader {
     /// The underlying USTAR header block.
     pub header: Header,
     /// PAX extended header key-value pairs, in the order they appeared in the
-    /// archive. Empty if the entry had no PAX extensions.
-    pub pax_extensions: Vec<(String, String)>,
+    /// archive.  Values are raw bytes; keys are always valid UTF-8 per spec.
+    pub pax_extensions: Vec<(String, Vec<u8>)>,
 }
 
 impl CanonicalTarHeader {
@@ -42,6 +57,9 @@ impl CanonicalTarHeader {
     ///
     /// Must be called before the entry's data is read, since the PAX extension
     /// block is part of the same data stream.
+    ///
+    /// Values are stored as raw bytes to accommodate non-UTF-8 payloads such
+    /// as `SCHILY.xattr.security.capability`.
     pub fn from_entry<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<Self> {
         let header = entry.header().clone();
         let pax_extensions = match entry.pax_extensions() {
@@ -55,10 +73,10 @@ impl CanonicalTarHeader {
                         .key()
                         .map_err(|e| anyhow!("invalid PAX key: {e}"))?
                         .to_string();
-                    let val = ext
-                        .value()
-                        .map_err(|e| anyhow!("invalid PAX value: {e}"))?
-                        .to_string();
+                    // Store values as raw bytes — do not require UTF-8 here.
+                    // Binary xattr values (security.capability etc.) are valid
+                    // PAX payloads despite not being valid UTF-8.
+                    let val = ext.value_bytes().to_vec();
                     pairs.push((key, val));
                 }
                 pairs
@@ -78,7 +96,9 @@ impl CanonicalTarHeader {
     /// carries the full value and must be checked first.
     pub fn path(&self) -> Result<Cow<'_, Path>> {
         if let Some((_, v)) = self.pax_extensions.iter().find(|(k, _)| k == "path") {
-            return Ok(Cow::Owned(PathBuf::from(v)));
+            let s = std::str::from_utf8(v)
+                .map_err(|e| anyhow!("PAX 'path' extension is not valid UTF-8: {e}"))?;
+            return Ok(Cow::Owned(PathBuf::from(s)));
         }
         self.header
             .path()
@@ -102,7 +122,9 @@ impl CanonicalTarHeader {
     pub fn link_name(&self) -> Result<Option<PathBuf>> {
         // Check PAX extensions first.
         if let Some((_, v)) = self.pax_extensions.iter().find(|(k, _)| k == "linkpath") {
-            return Ok(Some(PathBuf::from(v)));
+            let s = std::str::from_utf8(v)
+                .map_err(|e| anyhow!("PAX 'linkpath' extension is not valid UTF-8: {e}"))?;
+            return Ok(Some(PathBuf::from(s)));
         }
         // Fall back to the USTAR field.
         Ok(self
@@ -229,12 +251,9 @@ impl CanonicalTarHeader {
     /// Write this entry to `builder` at `path`, streaming `data` as the file
     /// content.
     ///
-    /// Any PAX extensions stored on this header are emitted before the main
-    /// entry via [`tar::Builder::append_pax_extensions`]. For hardlink entries,
-    /// use [`write_hardlink_to_tar`] instead — see that method's documentation
-    /// for why `append_data` is not suitable for hardlinks with long paths.
-    ///
-    /// [`write_hardlink_to_tar`]: CanonicalTarHeader::write_hardlink_to_tar
+    /// All stored PAX extensions — including binary-valued ones such as
+    /// `SCHILY.xattr.security.capability` — are emitted verbatim before the
+    /// main entry via [`tar::Builder::append_pax_extensions`].
     pub fn write_to_tar<W: Write, R: Read>(
         &self,
         path: &Path,
@@ -246,7 +265,7 @@ impl CanonicalTarHeader {
                 .append_pax_extensions(
                     self.pax_extensions
                         .iter()
-                        .map(|(k, v)| (k.as_str(), v.as_bytes())),
+                        .map(|(k, v)| (k.as_str(), v.as_slice())),
                 )
                 .map_err(|e| anyhow!("failed to append PAX extensions: {e}"))?;
         }
