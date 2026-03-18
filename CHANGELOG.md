@@ -15,15 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- *(cli)* add doc=false for the bin output
-- *(Cargo.toml)* always optimize dependencies
+- *(cli)* add doc=false for the cargo-cli bin output
 - *(cli)* use better 'about' string
+- *(Cargo.toml)* always optimize dependencies
 - *(canonical)* don't assume PAX values are UTF-8
-
-### Other
-
-- don't publish
-- updated for pull support
 
 ## [0.1.2](https://github.com/edera-dev/ocirender/compare/v0.1.1...v0.1.2) - 2026-03-14
 
