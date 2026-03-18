@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/edera-dev/ocirender/compare/v0.1.2...v0.2.0) - 2026-03-18
+
+### Added
+
+- *(cli)* implement registry pull/fetch support
+
+### Fixed
+
+- *(cli)* add doc=false for the bin output
+- *(Cargo.toml)* always optimize dependencies
+- *(cli)* use better 'about' string
+- *(canonical)* don't assume PAX values are UTF-8
+
+### Other
+
+- don't publish
+- updated for pull support
+
 ## [0.1.2](https://github.com/edera-dev/ocirender/compare/v0.1.1...v0.1.2) - 2026-03-14
 
 ### Fixed
