@@ -2,10 +2,8 @@
 name        = "ocirender-cli"
 description = "CLI for ocirender — fetch, convert, and verify OCI container images"
 license     = "Apache-2.0"
-version     = "0.1.2"
-homepage    = "https://github.com/edera-dev/ocirender"
-repository  = "https://github.com/edera-dev/ocirender"
 edition     = "2024"
+publish     = false
 
 [features]
 # Gates the e2e [[test]] target, which requires mksquashfs, squashfuse, and
