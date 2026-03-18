@@ -4,6 +4,11 @@ A Rust library and CLI tool for converting OCI container images directly into
 squashfs filesystem images, plain tar archives, or extracted directories —
 without extracting layer contents to intermediate disk storage.
 
+The library (`ocirender`) is the primary product. The CLI (`ocirender-cli`) is
+built as a convenience wrapper for development, testing, and validation — it
+demonstrates correct usage of the library's streaming API and serves as a
+reference for callers building their own tooling on top of it.
+
 ---
 
 ## What this implementation does
@@ -177,10 +182,15 @@ packer.finish().await?;
 `PackerProgress::LayerFinished(i)` events from the merge engine as each layer
 is processed. These events are emitted regardless of output format.
 
+For best throughput when downloading concurrently, deliver layers in descending
+index order (newest first) with bounded concurrency. The merge engine processes
+layers newest-first, so delivering the highest-index layer first minimises the
+time the output sink spends waiting.
+
 ### Verification
 
 ```rust
-pub fn verify(spec: ImageSpec, reference: &Path) -> Result<VerifyReport>
+pub fn verify(spec: ImageSpec, reference: &Path, ignore_ownership: bool) -> Result<VerifyReport>
 ```
 
 Compares a generated image against a reference directory:
@@ -190,6 +200,10 @@ Compares a generated image against a reference directory:
 - `ImageSpec::Dir` — diffs the directory directly against `reference`.
 - `ImageSpec::Tar` — returns `Err`. Extract to a directory first with
   `convert-dir`, then use `ImageSpec::Dir`.
+
+`ignore_ownership` skips uid/gid comparison. This is appropriate when comparing
+a squashfs image (which preserves ownership from tar headers) against a
+directory unpacked without root privileges (where `chown` silently fails).
 
 `VerifyReport` contains:
 - `only_in_generated` — paths present in the generated image but absent from
@@ -203,7 +217,10 @@ Compares a generated image against a reference directory:
 
 ## Project structure
 
+This is a Cargo workspace with two crates:
+
 ```
+Cargo.toml                  # workspace root (also the library crate)
 src/
   lib.rs          # ImageSpec, StreamingPacker, convert(), public async API
   canonical.rs    # CanonicalTarHeader: USTAR header + PAX extensions
@@ -221,8 +238,18 @@ tests/
   integration.rs  # Synthetic tests for the merge pipeline
   regression.rs   # Per-bug regression tests from production verify runs
   streaming.rs    # Streaming merge and StreamingPacker tests
-bin/
-  main.rs         # CLI entry point
+
+ocirender-cli/              # CLI crate (depends on the library)
+  src/
+    main.rs                 # CLI entry point and subcommand dispatch
+    registry/
+      client.rs             # OCI registry HTTP client (fetch, pull)
+      auth.rs               # Bearer token challenge parsing
+      credentials.rs        # ~/.docker/config.json credential store
+      reference.rs          # Image reference parsing and normalisation
+  tests/
+    e2e.rs                  # End-to-end CLI tests
+    fixtures/               # Synthetic OCI image fixture generator
 ```
 
 ### Key design decisions
@@ -250,6 +277,13 @@ output format (squashfs, tar, directory) affects only what is passed as the
 output target and a verification input source. This avoids a parallel set of
 types for read vs. write contexts while keeping the API surface small.
 
+**CLI registry client** (`ocirender-cli/src/registry/`): the library
+deliberately has no HTTP or credential dependencies. Registry pulling lives
+entirely in the CLI crate. The client uses the same worker-queue architecture
+recommended for `StreamingPacker` callers: N async tasks drain a shared queue
+ordered highest-index-first, each calling `notify_layer_ready` as its download
+completes.
+
 ---
 
 ## Input format
@@ -273,7 +307,37 @@ with magic byte detection as a fallback for layouts that omit `LayerSources`.
 
 ## CLI usage
 
-### Convert to squashfs
+The CLI is a thin wrapper around the library intended for development and
+validation. It is not a production container runtime client.
+
+### Store registry credentials
+
+```bash
+# ghcr.io — username is your GitHub username, password is a PAT with
+# read:packages scope or the output of `gh auth token`.
+gh auth token | ocirender login ghcr.io -u YOUR_USERNAME --password-stdin
+
+# Docker Hub
+ocirender login registry-1.docker.io -u YOUR_USERNAME --password-stdin
+
+# Credentials are stored in ~/.docker/config.json and are shared with
+# Docker, crane, skopeo, and other OCI tools.
+```
+
+### Fetch an image to an OCI layout directory
+
+```bash
+# Full fetch (all layer blobs)
+ocirender fetch --image alpine:latest --output ./alpine-layout
+
+# Manifest only (no layer blobs) — useful for validating manifest parsing
+ocirender fetch --image alpine:latest --output ./alpine-layout --manifest-only
+
+# Private registry
+ocirender fetch --image ghcr.io/myorg/myimage:tag --output ./my-layout
+```
+
+### Convert a local OCI layout to squashfs
 
 ```bash
 ocirender convert-squashfs --image ./my-image-dir --output my-image.squashfs
@@ -282,16 +346,22 @@ ocirender convert-squashfs --image ./my-image-dir --output my-image.squashfs \
     --mksquashfs /usr/local/bin/mksquashfs
 ```
 
-### Convert to tar
+### Convert to tar or directory
 
 ```bash
 ocirender convert-tar --image ./my-image-dir --output my-image.tar
+ocirender convert-dir --image ./my-image-dir --output ./my-image-root
 ```
 
-### Extract to directory
+### Pull directly (fetch + convert in one step)
+
+`pull` pipelines layer downloads with assembly via `StreamingPacker`, avoiding
+any intermediate OCI layout directory on disk.
 
 ```bash
-ocirender convert-dir --image ./my-image-dir --output ./my-image-root
+ocirender pull --image alpine:latest --output-squashfs alpine.squashfs
+ocirender pull --image alpine:latest --output-tar alpine.tar
+ocirender pull --image alpine:latest --output-dir ./alpine-root
 ```
 
 ### Verify
@@ -308,6 +378,9 @@ Compare a generated directory against a reference directory:
 ocirender verify --dir ./my-image-root --reference ./my-image-ref
 ```
 
+Pass `--ignore-ownership` when comparing a squashfs against a directory
+unpacked without root privileges.
+
 The verify subcommand reports:
 - Paths present only in the generated image (`+`)
 - Paths present only in the reference (`-`)
@@ -323,9 +396,23 @@ expected-only-in-reference paths (`.dockerenv`, `dev/console`, `dev/shm`,
 the live container filesystem including runtime-injected files and bind mounts.
 These are not conversion bugs.
 
+### Registry mirror
+
+To avoid rate limits during development, set a Docker Hub mirror:
+
+```bash
+# Via flag (applies to the current invocation only)
+ocirender --registry-mirror http://my-mirror.internal fetch --image alpine:latest ...
+
+# Via environment variable (applies to all invocations in the session)
+export OCIRENDER_REGISTRY_MIRROR=http://my-mirror.internal
+```
+
 ---
 
 ## Dependencies
+
+### Library (`ocirender`)
 
 | Crate | Purpose |
 |---|---|
@@ -338,8 +425,17 @@ These are not conversion bugs.
 | `serde` + `serde_json` | JSON parsing for index.json / manifest |
 | `sha2` | SHA-256 hashing in the verify subcommand |
 | `tempfile` | Temporary squashfuse mountpoint in verify |
-| `clap` | CLI argument parsing |
 | `anyhow` | Error handling throughout |
+
+### CLI (`ocirender-cli`)
+
+| Crate | Purpose |
+|---|---|
+| `clap` | Argument parsing |
+| `reqwest` | HTTPS registry client |
+| `indicatif` | Download and packing progress bars |
+| `base64` | Encoding/decoding `~/.docker/config.json` auth entries |
+| `futures-util` | Byte stream iteration for blob downloads |
 
 ## System dependencies
 
