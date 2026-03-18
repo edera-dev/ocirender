@@ -39,6 +39,7 @@ tar        = "0.4"
 [[bin]]
 name = "ocirender"
 path = "src/main.rs"
+doc = false
 
 [[test]]
 name             = "e2e"
