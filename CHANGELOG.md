@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/edera-dev/ocirender/compare/v0.2.0...v0.2.1) - 2026-04-01
+
+### Other
+
+- cargo update
+- Merge pull request #11 from edera-dev/dependabot/cargo/tar-0.4.45
+- Merge pull request #10 from edera-dev/dependabot/github_actions/actions/create-github-app-token-3.0.0
+- *(deps)* bump actions/create-github-app-token from 2.2.1 to 3.0.0
+
 ## [0.2.0](https://github.com/edera-dev/ocirender/compare/v0.1.2...v0.2.0) - 2026-03-18
 
 ### Added
