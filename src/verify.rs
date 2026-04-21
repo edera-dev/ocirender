@@ -284,7 +284,17 @@ fn hash_file(path: &Path) -> Result<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex_encode(&hasher.finalize()))
+}
+
+/// Encode `bytes` as a lowercase hex string.
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(s, "{b:02x}").unwrap();
+    }
+    s
 }
 
 // ─── Comparison ───────────────────────────────────────────────────────────────
