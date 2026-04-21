@@ -201,6 +201,62 @@ fn test_symlink_replaced_by_directory_across_layers() {
 }
 
 #[test]
+fn test_directory_implicitly_replaced_by_symlink_no_whiteout() {
+    // Some real-world images (e.g. gitlab-toolbox's `srv/gitlab/log` symlink
+    // covering a prior directory) replace a directory subtree with a
+    // non-directory in a newer layer *without* an explicit whiteout. The OCI
+    // layer spec is ambiguous here in practice, but Docker/overlayfs
+    // semantics shadow the older subtree implicitly. Without that handling,
+    // the merged tar contains both a symlink at P and a regular file at
+    // P/child, which mksquashfs rejects with "non-directory" FATAL ERROR.
+    let layer0 = LayerBuilder::new()
+        .add_dir("path")
+        .add_file("path/child.txt", b"old", 0o644)
+        .finish();
+
+    let layer1 = LayerBuilder::new()
+        .add_symlink("path", "elsewhere")
+        .finish();
+
+    let merged = merge(vec![blob(layer0, 0), blob(layer1, 1)]);
+    let paths = paths_in_tar(&merged);
+
+    assert!(paths.iter().any(|p| p == "path"));
+    assert!(
+        !paths.iter().any(|p| p == "path/child.txt"),
+        "older-layer children of an implicitly-shadowed directory must not \
+         survive; found paths: {paths:?}"
+    );
+    assert_eq!(
+        symlink_target_in_tar(&merged, "path"),
+        Some("elsewhere".to_string())
+    );
+}
+
+#[test]
+fn test_directory_implicitly_replaced_by_regular_file_no_whiteout() {
+    let layer0 = LayerBuilder::new()
+        .add_dir("path")
+        .add_file("path/child.txt", b"old", 0o644)
+        .finish();
+
+    let layer1 = LayerBuilder::new().add_file("path", b"new", 0o644).finish();
+
+    let merged = merge(vec![blob(layer0, 0), blob(layer1, 1)]);
+    let paths = paths_in_tar(&merged);
+
+    assert!(paths.iter().any(|p| p == "path"));
+    assert!(
+        !paths.iter().any(|p| p == "path/child.txt"),
+        "older-layer children of an implicitly-shadowed file must not survive"
+    );
+    assert_eq!(
+        file_contents_in_tar(&merged, "path").as_deref(),
+        Some(&b"new"[..])
+    );
+}
+
+#[test]
 fn test_directory_replaced_by_symlink_across_layers() {
     let layer0 = LayerBuilder::new()
         .add_dir("path")

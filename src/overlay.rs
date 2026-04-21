@@ -127,6 +127,13 @@ fn process_layer<W: Write>(
                 .context("hard link has no target")?;
             let target_path = normalize_path(&link_target);
 
+            // The link path will ultimately surface in the output as a
+            // non-directory (either the hardlink itself or, via promotion, a
+            // standalone regular file). Shadow it so older-layer entries
+            // beneath this path are suppressed — see non-directory shadow
+            // note below.
+            whiteout.insert_opaque(&path, blob.index);
+
             if whiteout.is_suppressed(&target_path, blob.index) {
                 // Target was whited out but this link path is alive. Record a
                 // promotion: at emit time, link_path will be written as a
@@ -145,6 +152,15 @@ fn process_layer<W: Write>(
             .write_to_tar(&path, &mut entry, output)
             .with_context(|| format!("emitting {}", path.display()))?;
         emitted.insert(&path);
+
+        // When a non-directory wins at path P, older-layer entries under
+        // P/... must be implicitly suppressed: OCI layers do not require an
+        // explicit whiteout to replace a directory tree with a non-directory,
+        // and real images (e.g. gitlab-toolbox's `srv/gitlab/log` symlink
+        // covering the prior directory) rely on this.
+        if canonical.entry_type() != EntryType::Directory {
+            whiteout.insert_opaque(&path, blob.index);
+        }
     }
 
     // Discard the per-layer suppressed-file buffer. It exists only to serve
