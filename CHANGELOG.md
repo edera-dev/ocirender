@@ -14,16 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(overlay)* handle case where symlink replaces a directory
 
 ### Other
-
-- *(deps)* bump step-security/harden-runner from 2.16.0 to 2.18.0
-- *(deps)* bump step-security/harden-runner from 2.16.0 to 2.18.0
-- *(deps)* bump actions/create-github-app-token from 3.0.0 to 3.1.1
 - *(cargo)* update sha2 dependency
 - *(cargo)* dependency updates
-- cargo update
-- Merge pull request #11 from edera-dev/dependabot/cargo/tar-0.4.45
-- Merge pull request #10 from edera-dev/dependabot/github_actions/actions/create-github-app-token-3.0.0
-- *(deps)* bump actions/create-github-app-token from 2.2.1 to 3.0.0
 
 ## [0.2.0](https://github.com/edera-dev/ocirender/compare/v0.1.2...v0.2.0) - 2026-03-18
 
