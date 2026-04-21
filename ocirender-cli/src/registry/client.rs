@@ -796,7 +796,16 @@ fn is_index_type(ct: &str) -> bool {
 fn sha256_hex(data: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(data);
-    format!("{:x}", h.finalize())
+    hex_encode(&h.finalize())
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(s, "{b:02x}").unwrap();
+    }
+    s
 }
 
 /// Select the descriptor from an index whose platform matches `(os, arch)`.
@@ -867,7 +876,7 @@ fn hash_file_sync(path: &Path) -> Result<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex_encode(&hasher.finalize()))
 }
 
 /// Progress bar style for an active layer download.
