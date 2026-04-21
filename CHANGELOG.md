@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/edera-dev/ocirender/compare/v0.2.0...v0.2.1) - 2026-04-21
+
+### Fixed
+
+- *(overlay)* handle case where symlink replaces a directory
+
+### Other
+- *(cargo)* update sha2 dependency
+- *(cargo)* dependency updates
+
 ## [0.2.0](https://github.com/edera-dev/ocirender/compare/v0.1.2...v0.2.0) - 2026-03-18
 
 ### Added
