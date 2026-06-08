@@ -31,7 +31,7 @@ tokio        = { version = "1", features = ["full"] }
 [dev-dependencies]
 flate2     = { version = "1", features = ["zlib-rs"], default-features = false }
 libc       = "0.2"
-oci-spec   = { version = "0.9", features = ["image"] }
+oci-spec   = { version = "0.10", features = ["image"] }
 tar        = "0.4"
 
 [[bin]]
