@@ -73,8 +73,8 @@ fn squashfs_binary_not_found_returns_error() {
         result
             .unwrap_err()
             .to_string()
-            .contains("spawning mksquashfs"),
-        "error must mention spawning mksquashfs"
+            .contains("mksquashfs not found"),
+        "error must indicate the mksquashfs binary was not found"
     );
     assert!(
         !out_path.exists(),

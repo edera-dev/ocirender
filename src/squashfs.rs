@@ -11,6 +11,8 @@ use std::{
     path::Path,
     process::{Child, Command, Stdio},
     sync::mpsc,
+    thread,
+    time::Duration,
 };
 
 use crate::{PackerProgress, image::LayerBlob, overlay::merge_layers_into_streaming};
@@ -107,10 +109,8 @@ pub fn write_squashfs_with_progress(
 /// explicit tar entry get mode `0755` and ownership `0:0`, rather than
 /// inheriting the invoking user's identity.
 fn spawn_mksquashfs(output: &Path, binpath: Option<&Path>) -> Result<Child> {
-    let mut cmd = match binpath {
-        Some(p) => Command::new(p),
-        None => Command::new("mksquashfs"),
-    };
+    let program = binpath.unwrap_or(Path::new("mksquashfs"));
+    let mut cmd = Command::new(program);
     cmd.args([
         "-",
         output.to_str().context("output path is not UTF-8")?,
@@ -131,7 +131,35 @@ fn spawn_mksquashfs(output: &Path, binpath: Option<&Path>) -> Result<Child> {
     ])
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .spawn()
-    .context("spawning mksquashfs — is it installed?")
+    .stderr(Stdio::piped());
+
+    // Spawning can transiently fail with ETXTBSY ("Text file busy"): if another
+    // thread in this process forks (to spawn any child) while `program` is still
+    // open for writing elsewhere, the forked child inherits that write handle
+    // until it execs, and an exec of `program` in that window is refused. This
+    // is a race, not a real fault, so retry a few times with a short backoff.
+    const ETXTBSY: i32 = 26; // Linux errno for "Text file busy"
+    const MAX_RETRIES: u32 = 5;
+    let mut attempt: u32 = 0;
+    loop {
+        match cmd.spawn() {
+            Ok(child) => return Ok(child),
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) && attempt < MAX_RETRIES => {
+                attempt += 1;
+                thread::sleep(Duration::from_millis(5 * u64::from(attempt)));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // The one case where "is it installed?" is the right hint.
+                return Err(e).with_context(|| {
+                    format!(
+                        "mksquashfs not found at `{}` — is squashfs-tools installed?",
+                        program.display()
+                    )
+                });
+            }
+            // Anything else (including ETXTBSY that outlived the retries): don't
+            // guess a cause — surface the underlying OS error, errno and all.
+            Err(e) => bail!("spawning mksquashfs at `{}` failed: {e}", program.display()),
+        }
+    }
 }
