@@ -7,6 +7,23 @@ description: >
 runs:
   using: composite
   steps:
+    # Restore the cargo registry + build cache seeded on main by cache-warm.yaml.
+    # Read-only: this gate runs on PRs (ci-code.yaml) and on main before the
+    # release-plz release (release.yaml); cache-warm.yaml is the sole writer.
+    # Keyed on runner.arch because the CI matrix spans x86_64 and aarch64 and
+    # both report runner.os == Linux.
+    - name: Restore cargo cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+          target
+        key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          cargo-${{ runner.os }}-${{ runner.arch }}-
+
     - name: Install test suite dependencies
       shell: bash
       run: |
@@ -16,9 +33,13 @@ runs:
           apt -y install squashfs-tools squashfuse umoci
         '
 
+    # Prebuilt, checksum-verified cargo-audit (SHA256 against install-action's
+    # pinned manifest, plus attestation/signature when the release provides one)
+    # rather than compiling it from source on every run.
     - name: Install cargo-audit
-      shell: bash
-      run: cargo install cargo-audit --locked
+      uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+      with:
+        tool: cargo-audit@0.22.2
 
     - name: cargo fmt
       shell: bash

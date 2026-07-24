@@ -37,8 +37,5 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: cargo build
-        run: cargo build
-
       - name: quality gate
         uses: ./.github/actions/quality-gate
