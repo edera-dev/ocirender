@@ -16,11 +16,11 @@ network = ["e2e"]
 [dependencies]
 ocirender    = { path = ".." }
 anyhow       = "1"
-base64       = "0.22"
+base64       = "0.23"
 clap         = { version = "4", features = ["derive"] }
 futures-util = "0.3"
 indicatif    = "0.18.4"
-reqwest      = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+reqwest      = { version = "0.13", default-features = false, features = ["rustls", "stream", "json"] }
 serde        = { version = "1", features = ["derive"] }
 serde_json   = "1"
 sha2         = "0.11"
@@ -31,7 +31,7 @@ tokio        = { version = "1", features = ["full"] }
 [dev-dependencies]
 flate2     = { version = "1", features = ["zlib-rs"], default-features = false }
 libc       = "0.2"
-oci-spec   = { version = "0.9", features = ["image"] }
+oci-spec   = { version = "0.10", features = ["image"] }
 tar        = "0.4"
 
 [[bin]]

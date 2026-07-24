@@ -36,7 +36,7 @@ zstd       = "0.13"
 [dev-dependencies]
 tokio    = { version = "1", features = ["full"] }
 libc     = "0.2"
-oci-spec = { version = "0.9", features = ["image"] }
+oci-spec = { version = "0.10", features = ["image"] }
 
 [patch.crates-io]
 indicatif = { git = "https://github.com/edera-dev/indicatif.git", rev = "51e3a390b5d64ca8ab86044e578e2bb2bfe718a1" }
