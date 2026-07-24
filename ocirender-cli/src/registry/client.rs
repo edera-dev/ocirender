@@ -129,6 +129,13 @@ impl RegistryClient {
     /// (via [`CredentialStore::load`]) and consulted when fetching Bearer
     /// tokens for private registries.
     pub fn new(mirror: Option<&str>, credentials: CredentialStore) -> Result<Self> {
+        // reqwest's `rustls-no-provider` feature (which lets us use rustls
+        // backed by ring instead of dragging in aws-lc-rs) builds no default
+        // crypto provider into the client, so one must be installed in the
+        // process before the first `Client::builder()` or it panics. Install
+        // ring here, co-located with the only client we build; the call is
+        // idempotent, so ignore the Err returned if it was already set.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let http = reqwest::Client::builder()
             .use_rustls_tls()
             .build()
