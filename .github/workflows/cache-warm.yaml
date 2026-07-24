@@ -1,0 +1,72 @@
+name: cache-warm
+
+# ci-code.yaml runs only on pull_request, so the cargo cache its quality gate
+# restores must live in the default-branch scope: GitHub only lets a branch
+# restore caches created on its base/default branch. Seed that shared cache on
+# push to main so every PR — and the pre-release quality gate in release.yaml —
+# starts warm. The matrix mirrors ci-code.yaml so both architectures are seeded
+# (their caches are distinct: runner.os is Linux for both, runner.arch differs).
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  warm:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+        - { arch: x86_64, on: ubuntu-latest }
+        - { arch: aarch64, on: ubuntu-24.04-arm }
+    runs-on: "${{ matrix.platform.on }}"
+    name: 'warm cargo cache linux-${{ matrix.platform.arch }}'
+    steps:
+      - name: harden runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          egress-policy: audit
+
+      - name: checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # zizmor: ignore[stale-action-refs]
+        with:
+          components: rustfmt, clippy
+
+      # Read-write: this is the only writer of the shared cargo cache. Same key
+      # the quality-gate composite restores from.
+      - name: cache cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      # Compile the dependency graph (the expensive part — deps build at
+      # opt-level 3 here) plus the network/e2e test harness, matching what the
+      # quality gate's `cargo test-network` compiles. clippy and doc reuse these
+      # dependency artifacts. cargo-audit is not seeded: the gate installs it as
+      # a prebuilt binary.
+      - name: warm build cache
+        shell: bash
+        run: |
+          cargo build
+          cargo test-network --no-run
