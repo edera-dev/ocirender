@@ -45,7 +45,7 @@ jobs:
         uses: ./.github/actions/quality-gate
 
       - name: Run release-plz
-        uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
+        uses: release-plz/action@8e61445f0b34e7c6d985255f2f1f05a36eb350dc # v0.5.137
         with:
           command: release
         env:
@@ -88,7 +88,7 @@ jobs:
           private-key: "${{ secrets.EDERA_CULTIVATION_APP_PRIVATE_KEY }}"
 
       - name: Run release-plz
-        uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
+        uses: release-plz/action@8e61445f0b34e7c6d985255f2f1f05a36eb350dc # v0.5.137
         with:
           command: release-pr
         env:
