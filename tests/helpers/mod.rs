@@ -126,6 +126,25 @@ impl LayerBuilder {
         self
     }
 
+    /// Add a hardlink whose target is written verbatim into the USTAR
+    /// linkname field, so an absolute or `./`-prefixed spelling survives
+    /// (`set_link_name` would normalise it). `target` must fit in 100 bytes.
+    pub fn add_hardlink_raw(mut self, path: &str, target: &str) -> Self {
+        let mut hdr = Header::new_ustar();
+        hdr.set_path(path).unwrap();
+        hdr.set_entry_type(EntryType::Link);
+        hdr.set_size(0);
+        hdr.set_mode(0o644);
+        hdr.set_mtime(0);
+        hdr.set_uid(0);
+        hdr.set_gid(0);
+        let linkname = &mut hdr.as_ustar_mut().unwrap().linkname;
+        linkname[..target.len()].copy_from_slice(target.as_bytes());
+        hdr.set_cksum();
+        self.inner.append(&hdr, Cursor::new(b"" as &[u8])).unwrap();
+        self
+    }
+
     /// Add a FIFO (named pipe) entry.
     pub fn add_fifo(mut self, path: &str) -> Self {
         let mut header = tar::Header::new_gnu();

@@ -282,8 +282,13 @@ fn emit_deferred<W: Write>(
             // layer — drop the link silently.
             continue;
         }
+        // Emit the target as resolved above rather than as the layer spelled
+        // it: an absolute or `./`-prefixed target names the same archive
+        // member, but extractors resolve a hardlink target against the
+        // extraction root, and the `tar` crate (behind the dir output) refuses
+        // an absolute one.
         hl.canonical
-            .write_to_tar(&hl.link_path, &[] as &[u8], output)
+            .write_hardlink_to_tar(&hl.link_path, &hl.target_path, output)
             .with_context(|| format!("emitting hard link {}", hl.link_path.display()))?;
         emitted.insert(&hl.link_path);
     }

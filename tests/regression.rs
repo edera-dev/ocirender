@@ -690,3 +690,44 @@ fn regress_gnu_long_link_targets_kept() {
         "symlink with a GNU long-link target must keep its full target"
     );
 }
+
+/// Bug: deferred hardlinks were re-emitted with their target spelled as in the layer. The merge
+/// resolves an absolute or `./`-prefixed target to the archive member it names (see
+/// `regress_absolute_hardlink_target_normalized`), but the output kept the original spelling, and
+/// extractors resolve a hardlink target against the extraction root: the dir output, which
+/// unpacks with the `tar` crate, failed outright on an absolute target ("No such file or directory
+/// while canonicalizing /usr/share/foo").
+///
+/// Discovered via: code inspection, then confirmed with `convert-dir`.
+#[test]
+fn regress_hardlink_target_spelling_breaks_dir_output() {
+    use std::os::unix::fs::MetadataExt;
+
+    for spelling in ["/usr/share/foo", "./usr/share/foo"] {
+        let layer = LayerBuilder::new()
+            .add_file("usr/share/foo", b"data", 0o644)
+            .add_hardlink_raw("usr/share/bar", spelling)
+            .finish();
+
+        let merged = merge(vec![blob(layer.clone(), 0)]);
+        assert_eq!(
+            hardlink_target_in_tar(&merged, "usr/share/bar").as_deref(),
+            Some("usr/share/foo"),
+            "target spelled {spelling:?} must be emitted as the member it names"
+        );
+
+        let out = tempfile::tempdir().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Ok(blob(layer, 0))).unwrap();
+        drop(tx);
+        ocirender::dir::write_dir(rx, 1, out.path())
+            .unwrap_or_else(|e| panic!("dir output for target {spelling:?} failed: {e:#}"));
+        let target = fs::metadata(out.path().join("usr/share/foo")).unwrap();
+        let link = fs::metadata(out.path().join("usr/share/bar")).unwrap();
+        assert_eq!(
+            link.ino(),
+            target.ino(),
+            "target {spelling:?}: the link must be a hardlink to the target"
+        );
+    }
+}
