@@ -417,7 +417,10 @@ pub fn merge_layers_into<W: Write>(mut layers: Vec<LayerBlob>, sink: W) -> Resul
 /// An `Err` delivered on the channel (the caller failing to supply a layer)
 /// aborts the merge immediately with [`Error::LayerSource`]. If the channel
 /// closes before all `total_layers` items are received, the merge fails with
-/// [`Error::MissingLayers`].
+/// [`Error::MissingLayers`]. A layer delivered with an index outside the
+/// image, or delivered twice, fails it with [`Error::LayerIndexOutOfRange`]
+/// or [`Error::DuplicateLayer`]: either would otherwise leave a layer
+/// unaccounted for while the delivery count still came out right.
 ///
 /// `progress_tx`, if supplied, receives [`PackerProgress::LayerStarted`] and
 /// [`PackerProgress::LayerFinished`] events around each call to
@@ -441,6 +444,7 @@ pub fn merge_layers_into_streaming<W: Write>(
     let mut buffer: std::collections::HashMap<usize, LayerBlob> = std::collections::HashMap::new();
     let mut next_index = total_layers.saturating_sub(1);
     let mut received = 0usize;
+    let mut delivered = vec![false; total_layers];
 
     while received < total_layers {
         let blob = match receiver.recv() {
@@ -454,6 +458,17 @@ pub fn merge_layers_into_streaming<W: Write>(
                 .into());
             }
         };
+        match delivered.get_mut(blob.index) {
+            None => {
+                return Err(Error::LayerIndexOutOfRange {
+                    index: blob.index,
+                    count: total_layers,
+                }
+                .into());
+            }
+            Some(true) => return Err(Error::DuplicateLayer { index: blob.index }.into()),
+            Some(seen) => *seen = true,
+        }
         received += 1;
         buffer.insert(blob.index, blob);
 

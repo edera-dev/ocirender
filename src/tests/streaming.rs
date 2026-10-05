@@ -247,6 +247,42 @@ fn streaming_channel_error_after_good_layers_aborts_merge() {
     assert!(result.is_err(), "merge must return an error");
 }
 
+// ─── Error handling: bad layer indices ───────────────────────────────────────
+
+/// A layer index outside the image used to be buffered and never
+/// processed, while still counting towards the expected total: the merge
+/// "succeeded" with layers silently missing.
+#[test]
+fn streaming_out_of_range_index_is_an_error() {
+    let layer = || LayerBuilder::new().add_file("f", b"x", 0o644).finish();
+    let result = streaming_merge(vec![blob(layer(), 0), blob(layer(), 5)], 2);
+    assert!(
+        matches!(
+            result,
+            Err(MergeError::Input(Error::LayerIndexOutOfRange {
+                index: 5,
+                count: 2
+            }))
+        ),
+        "got {result:?}"
+    );
+}
+
+/// Likewise a layer delivered twice: it overwrote the first delivery and
+/// took the place of a layer that never arrived.
+#[test]
+fn streaming_duplicate_index_is_an_error() {
+    let layer = || LayerBuilder::new().add_file("f", b"x", 0o644).finish();
+    let result = streaming_merge(vec![blob(layer(), 0), blob(layer(), 0)], 2);
+    assert!(
+        matches!(
+            result,
+            Err(MergeError::Input(Error::DuplicateLayer { index: 0 }))
+        ),
+        "got {result:?}"
+    );
+}
+
 // ─── Error handling: premature channel close ──────────────────────────────────
 
 #[test]

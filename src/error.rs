@@ -74,6 +74,13 @@ pub enum Error {
         count: usize,
     },
 
+    /// The same layer was delivered more than once.
+    #[error("layer {index} was delivered more than once")]
+    DuplicateLayer {
+        /// The index delivered again.
+        index: usize,
+    },
+
     /// The packer is no longer accepting layers, because the conversion has
     /// already stopped. [`StreamingPacker::finish`](crate::StreamingPacker::finish)
     /// returns the reason.
