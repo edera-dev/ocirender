@@ -37,9 +37,11 @@ runs:
     # pinned manifest, plus attestation/signature when the release provides one)
     # rather than compiling it from source on every run.
     - name: Install cargo-audit
-      uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+      uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2.87.25
       with:
-        tool: cargo-audit@0.22.2
+        tool: |
+          cargo-audit@0.22.2
+          cargo-hack@0.6.45
 
     - name: cargo fmt
       shell: bash
@@ -58,6 +60,10 @@ runs:
     - name: cargo audit
       shell: bash
       run: cargo audit
+
+    - name: Check Rust version compatibility
+      shell: bash
+      run: cargo hack check --rust-version --feature-powerset --all-targets
 
     - name: cargo test
       shell: bash
