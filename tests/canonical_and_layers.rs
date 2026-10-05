@@ -208,6 +208,23 @@ fn write_hardlink_long_paths_produce_no_gnu_longname_entry() {
     }
 }
 
+/// A link path of exactly 100 bytes fills the USTAR name field and gets no PAX
+/// `path` extension, so it must be written in full rather than truncated to 99
+/// bytes for a NUL terminator the field does not need.
+#[test]
+fn write_hardlink_100_byte_link_path_roundtrip() {
+    let link: String = "l".repeat(100);
+    let tar = hardlink_tar(&link, "target.txt");
+    let entry = first_main_entry(&tar);
+
+    assert_eq!(entry.entry_type(), EntryType::Link);
+    assert_eq!(
+        entry.path().unwrap().to_string_lossy(),
+        link.as_str(),
+        "a 100-byte link path must not lose its last byte"
+    );
+}
+
 /// The source header's USTAR prefix must not leak onto the hardlink's path.
 #[test]
 fn write_hardlink_drops_source_prefix() {

@@ -230,15 +230,16 @@ impl CanonicalTarHeader {
         header.set_entry_type(EntryType::Link);
         header.set_size(0);
 
-        // Write link_path into the USTAR name field (bytes 0..100), truncated
-        // to 99 bytes to leave room for a NUL terminator. The PAX `path`
-        // extension above carries the full value when needed.
+        // Write link_path into the USTAR name field (bytes 0..100). Like
+        // linkname below, a value of exactly 100 bytes fills the field with no
+        // NUL terminator, so only values over 100 bytes are truncated, and
+        // those are carried in full by the PAX `path` extension above.
         {
             let raw = header.as_mut_bytes();
             let field = &mut raw[0..100];
             field.fill(0);
             let bytes = link_path_str.as_bytes();
-            let len = bytes.len().min(99);
+            let len = bytes.len().min(100);
             field[..len].copy_from_slice(&bytes[..len]);
         }
 
