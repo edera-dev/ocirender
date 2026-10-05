@@ -77,9 +77,13 @@ impl CanonicalTarHeader {
     /// An old-GNU sparse entry (typeflag `S`) is captured as a plain regular
     /// file of its real size, because that is what the entry reads back as:
     /// the `tar` crate fills in the holes as the data is read.
+    ///
+    /// A link target held in a GNU long-link (`K`) record is captured as a
+    /// PAX `linkpath` extension, since it is in neither the header nor the
+    /// entry's own PAX extensions.
     pub fn from_entry<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<Self> {
         let header = entry.header().clone();
-        let pax_extensions = match entry.pax_extensions() {
+        let mut pax_extensions = match entry.pax_extensions() {
             Err(e) => return Err(anyhow!("failed to read PAX extensions: {e}")),
             Ok(None) => vec![],
             Ok(Some(exts)) => {
@@ -99,6 +103,18 @@ impl CanonicalTarHeader {
                 pairs
             }
         };
+        // GNU-format archives (GNU tar's default) store a link target that
+        // does not fit the header's 100-byte linkname field in a separate `K`
+        // record ahead of the entry. The `tar` crate applies it to
+        // `Entry::link_name`, but the header keeps only the truncated field,
+        // so without this `link_name` would return a truncated target and
+        // `write_to_tar` would emit one.
+        if !pax_extensions.iter().any(|(k, _)| k == "linkpath")
+            && let Some(link) = entry.link_name_bytes()
+            && entry.header().link_name_bytes().as_deref() != Some(&*link)
+        {
+            pax_extensions.push(("linkpath".to_string(), link.into_owned()));
+        }
         let mut canonical = Self {
             header,
             pax_extensions,
@@ -158,7 +174,10 @@ impl CanonicalTarHeader {
     /// The USTAR linkname field is limited to 100 bytes. The `tar` crate's
     /// [`tar::Header::link_name`] reads only that field and silently returns a
     /// truncated path for targets longer than 100 bytes. The PAX `linkpath`
-    /// extension carries the full value and must be checked first.
+    /// extension carries the full value and must be checked first (a GNU
+    /// long-link record is captured as one by [`from_entry`]).
+    ///
+    /// [`from_entry`]: CanonicalTarHeader::from_entry
     ///
     /// Returns `Ok(None)` for entry types that have no link target.
     pub fn link_name(&self) -> Result<Option<PathBuf>> {

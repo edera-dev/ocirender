@@ -657,3 +657,36 @@ fn regress_pax_sparse_entry_whiteout_applies() {
         );
     }
 }
+
+/// Bug: GNU-format layers (GNU tar's default format) store a link target that does not fit the
+/// 100-byte linkname field in a GNU long-link (`K`) record ahead of the entry. The merge read link
+/// targets from PAX `linkpath` or the header field only, never the `K` record, so a long symlink
+/// target was silently truncated to 100 bytes in the output, and a hardlink with a long target was
+/// silently dropped (its truncated target never matched an emitted path).
+///
+/// Discovered via: code inspection, then confirmed with a GNU tar layer.
+#[test]
+fn regress_gnu_long_link_targets_kept() {
+    let long_dir = "d".repeat(110);
+    let target = format!("{long_dir}/canonical_file");
+    let symlink_target = format!("../{target}");
+
+    let layer = LayerBuilder::new()
+        .add_dir(&long_dir)
+        .add_file(&target, b"content", 0o644)
+        .add_link_gnu("lib/hardlink", &target, true)
+        .add_link_gnu("lib/symlink", &symlink_target, false)
+        .finish();
+    let merged = merge(vec![blob(layer, 0)]);
+
+    assert_eq!(
+        hardlink_target_in_tar(&merged, "lib/hardlink").as_deref(),
+        Some(target.as_str()),
+        "hardlink with a GNU long-link target must be emitted with its full target"
+    );
+    assert_eq!(
+        helpers::symlink_target_in_tar(&merged, "lib/symlink").as_deref(),
+        Some(symlink_target.as_str()),
+        "symlink with a GNU long-link target must keep its full target"
+    );
+}

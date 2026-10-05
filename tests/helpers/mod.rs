@@ -107,6 +107,25 @@ impl LayerBuilder {
         self
     }
 
+    /// Add a symlink (`hard == false`) or hardlink as GNU tar's default
+    /// format writes it: a target that does not fit the 100-byte linkname
+    /// field goes in a GNU long-link (`K`) record rather than PAX.
+    pub fn add_link_gnu(mut self, path: &str, target: &str, hard: bool) -> Self {
+        let mut hdr = Header::new_gnu();
+        hdr.set_entry_type(if hard {
+            EntryType::Link
+        } else {
+            EntryType::Symlink
+        });
+        hdr.set_size(0);
+        hdr.set_mode(0o777);
+        hdr.set_mtime(0);
+        hdr.set_uid(0);
+        hdr.set_gid(0);
+        self.inner.append_link(&mut hdr, path, target).unwrap();
+        self
+    }
+
     /// Add a FIFO (named pipe) entry.
     pub fn add_fifo(mut self, path: &str) -> Self {
         let mut header = tar::Header::new_gnu();
