@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/edera-dev/ocirender/compare/v0.2.3...v0.3.0) - 2026-10-05
+
+### Added
+
+- [**breaking**] take any Stream of layers in the streaming conversion API
+- [**breaking**] return a typed ocirender::Error instead of anyhow::Error
+
+### Fixed
+
+- *(overlay)* reject out-of-range and duplicate layer indices
+
+### Other
+
+- [**breaking**] make the library's internal modules private
+
 ## [0.2.3](https://github.com/edera-dev/ocirender/compare/v0.2.2...v0.2.3) - 2026-10-05
 
 ### Added
