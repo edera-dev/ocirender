@@ -299,6 +299,10 @@ The tool expects a directory in OCI image layout format, as produced by
 ./repositories
 ```
 
+Without an `index.json`, `manifest.json` may instead hold a single image
+manifest object (OCI, or Docker schema 2) as served by a registry, with its
+layer blobs under `blobs/sha256/`.
+
 Supported layer compression formats: gzip, zstd, bzip2, xz/lzma, and
 uncompressed. Format is determined from the `mediaType` field in the manifest,
 with magic byte detection as a fallback for layouts that omit `LayerSources`.

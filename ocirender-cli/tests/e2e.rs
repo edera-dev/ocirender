@@ -104,6 +104,7 @@ struct Fixtures {
     oci_layout: PathBuf,
     docker_save: PathBuf,
     docker_save_both: PathBuf,
+    bare_manifest: PathBuf,
 }
 
 /// Generate fixtures exactly once for the whole test run.
@@ -118,6 +119,7 @@ fn get_fixtures() -> &'static Fixtures {
             oci_layout: images.oci_layout,
             docker_save: images.docker_save,
             docker_save_both: images.docker_save_both,
+            bare_manifest: images.bare_manifest,
             _dir: dir,
         }
     })
@@ -136,6 +138,7 @@ fn get_fixtures_basic() -> &'static Fixtures {
             oci_layout: images.oci_layout,
             docker_save: images.docker_save,
             docker_save_both: images.docker_save_both,
+            bare_manifest: images.bare_manifest,
             _dir: dir,
         }
     })
@@ -359,6 +362,17 @@ fn e2e_both_metadata_files_prefers_index_json() {
         false,
         "docker-save-both (index.json preferred)",
     );
+}
+
+/// A layout whose manifest.json is a bare OCI image manifest, as a registry
+/// serves it, must convert like the OCI layout it was built from.
+#[test]
+fn e2e_bare_manifest_convert_and_verify() {
+    let fx = get_fixtures();
+    let work = TempDir::new().unwrap();
+    let squashfs = convert_squashfs(&fx.bare_manifest, work.path(), "bare-manifest");
+    let reference = umoci_unpack(&fx.oci_layout, "latest", work.path(), "bare-manifest-ref");
+    verify_squashfs_clean(&squashfs, &reference, false, "bare manifest.json");
 }
 
 /// Verify that the squashfs root directory has sane permissions (0755, root/root).

@@ -501,6 +501,138 @@ fn load_manifest_docker_save_empty_array_returns_error() {
     );
 }
 
+// ── load_manifest: bare image manifest ────────────────────────────────────────
+
+/// Write a layout whose `manifest.json` is a single image manifest object of
+/// type `manifest_media_type`, as a registry serves it, with `layers`
+/// (`(data, media_type)`; an empty media type omits the field) as blobs.
+fn bare_manifest_layout(layers: &[(&[u8], &str)], manifest_media_type: &str) -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let blobs = dir.path().join("blobs").join("sha256");
+    fs::create_dir_all(&blobs).unwrap();
+
+    let descriptors: Vec<serde_json::Value> = layers
+        .iter()
+        .map(|(data, media_type)| {
+            let digest = sha256_hex(data);
+            fs::write(blobs.join(&digest), data).unwrap();
+            let mut descriptor = serde_json::json!({
+                "digest": format!("sha256:{digest}"),
+                "size": data.len(),
+            });
+            if !media_type.is_empty() {
+                descriptor["mediaType"] = (*media_type).into();
+            }
+            descriptor
+        })
+        .collect();
+    let manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": manifest_media_type,
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": format!("sha256:{}", sha256_hex(b"{}")),
+            "size": 2,
+        },
+        "layers": descriptors,
+    });
+    fs::write(
+        dir.path().join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn load_manifest_bare_oci_manifest() {
+    let gzip_layer = [0x1f_u8, 0x8b, 0x00, 0x00];
+    let tar_layer = [0u8; 4];
+    let dir = bare_manifest_layout(
+        &[
+            (&gzip_layer, "application/vnd.oci.image.layer.v1.tar+gzip"),
+            (&tar_layer, "application/vnd.oci.image.layer.v1.tar"),
+        ],
+        "application/vnd.oci.image.manifest.v1+json",
+    );
+
+    let manifest = load_manifest(dir.path()).expect("a bare OCI manifest must load");
+    let layers = resolve_layers(dir.path(), &manifest).unwrap();
+    let blobs = dir.path().join("blobs").join("sha256");
+    assert_eq!(layers.len(), 2);
+    assert_eq!(layers[0].path, blobs.join(sha256_hex(&gzip_layer)));
+    assert_eq!(
+        layers[0].media_type,
+        "application/vnd.oci.image.layer.v1.tar+gzip"
+    );
+    assert_eq!(layers[1].path, blobs.join(sha256_hex(&tar_layer)));
+    assert_eq!(
+        layers[1].media_type,
+        "application/vnd.oci.image.layer.v1.tar"
+    );
+}
+
+#[test]
+fn load_manifest_bare_docker_schema2_manifest() {
+    let gzip_layer = [0x1f_u8, 0x8b, 0x00, 0x01];
+    let dir = bare_manifest_layout(
+        &[(
+            &gzip_layer,
+            "application/vnd.docker.image.rootfs.diff.tar.gzip",
+        )],
+        "application/vnd.docker.distribution.manifest.v2+json",
+    );
+
+    let manifest = load_manifest(dir.path()).expect("a bare Docker schema 2 manifest must load");
+    let layers = resolve_layers(dir.path(), &manifest).unwrap();
+    assert_eq!(layers.len(), 1);
+    assert_eq!(
+        layers[0].media_type,
+        "application/vnd.docker.image.rootfs.diff.tar.gzip"
+    );
+}
+
+#[test]
+fn load_manifest_bare_manifest_without_layer_media_type_falls_back_to_magic() {
+    let gzip_layer = [0x1f_u8, 0x8b, 0x00, 0x02];
+    let dir = bare_manifest_layout(
+        &[(&gzip_layer, "")],
+        "application/vnd.oci.image.manifest.v1+json",
+    );
+
+    let manifest = load_manifest(dir.path()).unwrap();
+    assert!(manifest.layers[0].media_type.is_empty());
+    let layers = resolve_layers(dir.path(), &manifest).unwrap();
+    assert_eq!(
+        layers[0].media_type,
+        "application/vnd.oci.image.layer.v1.tar+gzip"
+    );
+}
+
+#[test]
+fn load_manifest_bare_object_that_is_not_a_manifest_returns_error() {
+    // An image index saved as manifest.json is an object, but not an image
+    // manifest: it has no layers.
+    let dir = TempDir::new().unwrap();
+    let index = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [],
+    });
+    fs::write(
+        dir.path().join("manifest.json"),
+        serde_json::to_vec(&index).unwrap(),
+    )
+    .unwrap();
+
+    let err = load_manifest(dir.path()).expect_err("an index is not an image manifest");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("image manifest") && msg.contains("layers"),
+        "error must say what was expected and what is missing; got: {msg}"
+    );
+}
+
 // ── resolve_layers ────────────────────────────────────────────────────────────
 
 #[test]

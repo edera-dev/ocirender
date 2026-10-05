@@ -1,14 +1,17 @@
 //! OCI image layout parsing: reads `index.json` or `manifest.json` and
 //! resolves layer descriptors to blob file paths on disk.
 //!
-//! Two image layout formats are supported:
+//! Three image layout formats are supported:
 //!
 //! - **OCI image layout** (`index.json`): the standard format produced by
 //!   `skopeo copy docker://... oci:<dir>` and containerd. Layer blobs live
 //!   under `blobs/sha256/<hex-digest>`.
-//! - **Docker save layout** (`manifest.json`): produced by
+//! - **Docker save layout** (`manifest.json` holding an array): produced by
 //!   `docker save <image> | tar -x`. Layer paths are stored directly in the
 //!   manifest as relative paths like `blobs/sha256/<hex>`.
+//! - **Bare image manifest** (`manifest.json` holding an object): a single
+//!   OCI or Docker schema 2 image manifest, as served by a registry, with its
+//!   layer blobs under `blobs/sha256/<hex-digest>`.
 //!
 //! The primary entry points are [`load_manifest`], which parses whichever
 //! format is present and returns a normalised [`OciManifest`], and
@@ -103,8 +106,9 @@ pub fn detect_media_type(path: &Path) -> Result<&'static str> {
 /// Load and return the image manifest from `image_dir`.
 ///
 /// Tries `index.json` (OCI image layout) first, then falls back to
-/// `manifest.json` (Docker save layout). Both formats are normalised into an
-/// [`OciManifest`] before returning.
+/// `manifest.json`, which may hold either a Docker save layout or a bare
+/// image manifest. Every format is normalised into an [`OciManifest`] before
+/// returning.
 ///
 /// Returns an error if neither file is found, or if the manifest cannot be
 /// parsed.
@@ -124,68 +128,84 @@ pub fn load_manifest(image_dir: &Path) -> Result<OciManifest> {
 
     let manifest_path = image_dir.join("manifest.json");
     if manifest_path.exists() {
-        // Docker save manifest.json has a different schema from the OCI manifest:
-        // it is an array of objects (one per tagged image), each with a `Layers`
-        // array of relative blob paths and an optional `LayerSources` map that
-        // carries media types. We only process the first image in the array.
-        #[derive(Deserialize)]
-        struct LayerSource {
-            #[serde(rename = "mediaType")]
-            media_type: String,
-        }
-
-        #[derive(Deserialize)]
-        struct DockerManifest {
-            #[serde(rename = "Layers")]
-            layers: Vec<String>,
-            /// Present in Docker save layouts produced by newer Docker versions
-            /// and by skopeo. Maps digest (`sha256:<hex>`) to a layer descriptor
-            /// carrying the media type. Absent in older layouts.
-            #[serde(rename = "LayerSources", default)]
-            layer_sources: HashMap<String, LayerSource>,
-        }
-
         let data = std::fs::read_to_string(&manifest_path).context("reading manifest.json")?;
-        let manifests: Vec<DockerManifest> =
+        let root: serde_json::Value =
             serde_json::from_str(&data).context("parsing manifest.json")?;
-        let dm = manifests
-            .into_iter()
-            .next()
-            .context("manifest.json is empty")?;
-
-        let layers = dm
-            .layers
-            .into_iter()
-            .map(|l| {
-                // Layer paths look like "blobs/sha256/<hex>".
-                // LayerSources keys look like "sha256:<hex>".
-                // Reconstruct the digest key from the path's final component.
-                let digest = l
-                    .rsplit('/')
-                    .next()
-                    .map(|hex| format!("sha256:{hex}"))
-                    .unwrap_or_default();
-                let media_type = dm
-                    .layer_sources
-                    .get(&digest)
-                    .map(|s| s.media_type.clone())
-                    // Empty string signals "unknown"; resolve_layers will fall
-                    // back to magic byte detection for this layer.
-                    .unwrap_or_default();
-                OciDescriptor {
-                    digest: l,
-                    media_type,
-                }
-            })
-            .collect();
-
-        return Ok(OciManifest { layers });
+        // `docker save` writes an array, one entry per tagged image. A lone
+        // object is instead a single image manifest, OCI or Docker schema 2
+        // alike, as in a layout assembled from a registry's responses rather
+        // than exported by a tool.
+        return if root.is_array() {
+            docker_save_manifest(root)
+        } else {
+            serde_json::from_value(root).context("parsing manifest.json as an image manifest")
+        };
     }
 
     bail!(
         "no index.json or manifest.json found in {}",
         image_dir.display()
     );
+}
+
+/// Normalise a Docker save `manifest.json` into an [`OciManifest`].
+///
+/// Docker save manifest.json has a different schema from the OCI manifest:
+/// it is an array of objects (one per tagged image), each with a `Layers`
+/// array of relative blob paths and an optional `LayerSources` map that
+/// carries media types. Only the first image in the array is processed.
+fn docker_save_manifest(root: serde_json::Value) -> Result<OciManifest> {
+    #[derive(Deserialize)]
+    struct LayerSource {
+        #[serde(rename = "mediaType")]
+        media_type: String,
+    }
+
+    #[derive(Deserialize)]
+    struct DockerManifest {
+        #[serde(rename = "Layers")]
+        layers: Vec<String>,
+        /// Present in Docker save layouts produced by newer Docker versions
+        /// and by skopeo. Maps digest (`sha256:<hex>`) to a layer descriptor
+        /// carrying the media type. Absent in older layouts.
+        #[serde(rename = "LayerSources", default)]
+        layer_sources: HashMap<String, LayerSource>,
+    }
+
+    let manifests: Vec<DockerManifest> =
+        serde_json::from_value(root).context("parsing manifest.json")?;
+    let dm = manifests
+        .into_iter()
+        .next()
+        .context("manifest.json is empty")?;
+
+    let layers = dm
+        .layers
+        .into_iter()
+        .map(|l| {
+            // Layer paths look like "blobs/sha256/<hex>".
+            // LayerSources keys look like "sha256:<hex>".
+            // Reconstruct the digest key from the path's final component.
+            let digest = l
+                .rsplit('/')
+                .next()
+                .map(|hex| format!("sha256:{hex}"))
+                .unwrap_or_default();
+            let media_type = dm
+                .layer_sources
+                .get(&digest)
+                .map(|s| s.media_type.clone())
+                // Empty string signals "unknown"; resolve_layers will fall
+                // back to magic byte detection for this layer.
+                .unwrap_or_default();
+            OciDescriptor {
+                digest: l,
+                media_type,
+            }
+        })
+        .collect();
+
+    Ok(OciManifest { layers })
 }
 
 /// Resolve an [`OciDescriptor`] to an [`OciManifest`], following one level of

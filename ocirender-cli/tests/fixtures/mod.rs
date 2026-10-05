@@ -1,11 +1,12 @@
 //! Fixture generation for e2e tests.
 //!
-//! Produces three OCI image layout directories that share the same layer blobs
+//! Produces four OCI image layout directories that share the same layer blobs
 //! but differ in their metadata format:
 //!
 //!   oci-layout/        — index.json only  (OCI image layout)
 //!   docker-save/       — manifest.json only (Docker save format)
 //!   docker-save-both/  — both files present (index.json takes precedence)
+//!   bare-manifest/     — manifest.json holding a bare OCI image manifest
 //!
 //! The layers collectively exercise:
 //!   - All supported compression formats (uncompressed, gzip, zstd, bzip2, xz)
@@ -29,11 +30,12 @@ use tar::{Builder, EntryType, Header};
 
 // ── public types ──────────────────────────────────────────────────────────────
 
-/// Paths to the three generated image directories.
+/// Paths to the four generated image directories.
 pub struct FixtureImage {
     pub oci_layout: PathBuf,
     pub docker_save: PathBuf,
     pub docker_save_both: PathBuf,
+    pub bare_manifest: PathBuf,
 }
 
 /// Generate all fixture images under `base_dir` and return their paths.
@@ -97,15 +99,17 @@ pub fn generate_fixtures(base_dir: &Path) -> Result<FixtureImage> {
         })
         .collect();
 
-    // Write three image layouts.
+    // Write four image layouts.
     let oci_layout = write_oci_layout(base_dir, &digested)?;
     let docker_save = write_docker_save(base_dir, &digested)?;
     let docker_save_both = write_docker_save_both(base_dir, &digested)?;
+    let bare_manifest = write_bare_manifest(base_dir, &digested)?;
 
     Ok(FixtureImage {
         oci_layout,
         docker_save,
         docker_save_both,
+        bare_manifest,
     })
 }
 
@@ -467,6 +471,46 @@ fn write_docker_save(base: &Path, layers: &[DigestedBlob]) -> Result<PathBuf> {
     std::fs::write(blobs_sha256.join(&config_digest), &config_json)?;
 
     write_docker_manifest_json(&dir, layers, &config_digest)?;
+    Ok(dir)
+}
+
+/// Write a layout whose manifest.json is the bare OCI image manifest (as a
+/// registry serves it) instead of a Docker save array, with no index.json.
+fn write_bare_manifest(base: &Path, layers: &[DigestedBlob]) -> Result<PathBuf> {
+    let dir = base.join("bare-manifest");
+    let blobs_sha256 = dir.join("blobs").join("sha256");
+    std::fs::create_dir_all(&blobs_sha256)?;
+
+    for layer in layers {
+        std::fs::write(blobs_sha256.join(&layer.digest), &layer.data)?;
+    }
+
+    let config_json = make_config_json(layers);
+    let config_digest = sha256_hex(config_json.as_bytes());
+    std::fs::write(blobs_sha256.join(&config_digest), &config_json)?;
+
+    let manifest_layers: Vec<serde_json::Value> = layers
+        .iter()
+        .map(|l| {
+            serde_json::json!({
+                "mediaType": l.media_type,
+                "digest": l.digest_with_prefix(),
+                "size": l.size,
+            })
+        })
+        .collect();
+    let manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": format!("sha256:{config_digest}"),
+            "size": config_json.len(),
+        },
+        "layers": manifest_layers,
+    });
+    std::fs::write(dir.join("manifest.json"), serde_json::to_vec(&manifest)?)
+        .context("writing manifest.json")?;
     Ok(dir)
 }
 
