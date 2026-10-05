@@ -109,6 +109,78 @@ pub fn generate_fixtures(base_dir: &Path) -> Result<FixtureImage> {
     })
 }
 
+/// A single-layer image whose layer is shaped like Go `archive/tar` output.
+pub struct GoUstarImage {
+    pub oci_layout: PathBuf,
+    /// Normalised path of a file whose absolute source path is 101 bytes,
+    /// split across the USTAR prefix and name fields.
+    pub split_path_file: String,
+}
+
+/// Generate, under `base_dir`, an OCI layout with one uncompressed layer
+/// mirroring what Go's `archive/tar` writes for a nix2container image:
+/// absolute `/nix/store/...` paths and a 101-byte path split across the USTAR
+/// prefix and name fields.
+pub fn generate_go_ustar_image(base_dir: &Path) -> Result<GoUstarImage> {
+    let store = format!("/nix/store/{}-pkg-1.0", "a".repeat(32));
+    let share = format!("{store}/share");
+    // 101 bytes in total with the '/' joining prefix and name.
+    let split_name = "f".repeat(101 - share.len() - 1);
+
+    let mut b = Builder::new(Vec::new());
+    for dir in ["/nix", "/nix/store", store.as_str(), share.as_str()] {
+        let h = go_ustar_header("", &format!("{dir}/"), EntryType::Directory, 0, 0, "root");
+        b.append(&h, Cursor::new(b"" as &[u8]))?;
+    }
+    let h = go_ustar_header(&share, &split_name, EntryType::Regular, 6, 0, "root");
+    b.append(&h, Cursor::new(b"split\n" as &[u8]))?;
+    b.finish()?;
+    let layer = b.into_inner()?;
+
+    let blob = DigestedBlob {
+        diff_id: sha256_hex(&layer),
+        digest: sha256_hex(&layer),
+        size: layer.len() as u64,
+        data: layer,
+        media_type: "application/vnd.oci.image.layer.v1.tar",
+    };
+    Ok(GoUstarImage {
+        oci_layout: write_oci_layout(&base_dir.join("go-ustar"), &[blob])?,
+        split_path_file: format!("{}/{split_name}", &share[1..]),
+    })
+}
+
+/// A USTAR header with `prefix` and `name` written raw, as Go's `archive/tar`
+/// does (`set_path` rejects absolute paths and picks its own split point),
+/// owned by `id` for both uid and gid but naming both owners `owner_name`.
+fn go_ustar_header(
+    prefix: &str,
+    name: &str,
+    entry_type: EntryType,
+    size: u64,
+    id: u64,
+    owner_name: &str,
+) -> Header {
+    let mut h = Header::new_ustar();
+    h.set_entry_type(entry_type);
+    h.set_size(size);
+    h.set_mode(if entry_type == EntryType::Directory {
+        0o755
+    } else {
+        0o644
+    });
+    h.set_mtime(0);
+    h.set_uid(id);
+    h.set_gid(id);
+    h.set_username(owner_name).unwrap();
+    h.set_groupname(owner_name).unwrap();
+    let ustar = h.as_ustar_mut().unwrap();
+    ustar.prefix[..prefix.len()].copy_from_slice(prefix.as_bytes());
+    ustar.name[..name.len()].copy_from_slice(name.as_bytes());
+    h.set_cksum();
+    h
+}
+
 // ── uid / gid ─────────────────────────────────────────────────────────────────
 
 fn current_uid_gid() -> (u32, u32) {

@@ -152,6 +152,32 @@ impl LayerBuilder {
         self
     }
 
+    /// Add a regular file whose path is split across the USTAR `prefix` and
+    /// `name` fields exactly as given, the way Go's `archive/tar` (and so
+    /// nix2container) encodes a path of 101..=256 bytes.  Both fields are
+    /// written raw, bypassing `set_path` (which rejects absolute paths and
+    /// picks its own split point), so a leading `/` or `./` survives.
+    pub fn add_file_ustar_split(
+        mut self,
+        prefix: &str,
+        name: &str,
+        data: &[u8],
+        mode: u32,
+    ) -> Self {
+        let mut hdr = Header::new_ustar();
+        hdr.set_size(data.len() as u64);
+        hdr.set_mode(mode);
+        hdr.set_mtime(0);
+        hdr.set_uid(0);
+        hdr.set_gid(0);
+        let ustar = hdr.as_ustar_mut().unwrap();
+        ustar.prefix[..prefix.len()].copy_from_slice(prefix.as_bytes());
+        ustar.name[..name.len()].copy_from_slice(name.as_bytes());
+        hdr.set_cksum();
+        self.inner.append(&hdr, Cursor::new(data)).unwrap();
+        self
+    }
+
     pub fn add_whiteout(self, dir: &str, name: &str) -> Self {
         let path = if dir.is_empty() {
             format!(".wh.{name}")

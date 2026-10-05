@@ -165,6 +165,25 @@ impl CanonicalTarHeader {
         }
     }
 
+    /// Clone the header block for emission, clearing the fields that must not
+    /// carry over from the source entry:
+    ///
+    /// - USTAR `prefix`: [`tar::Builder::append_data`] only writes it when it
+    ///   has to split a path longer than 100 bytes, so a path that fits in
+    ///   `name` would otherwise be read back as `<source prefix>/<name>`. That
+    ///   happens whenever the emitted path is shorter than the source path
+    ///   (e.g. `normalize_path` stripping the leading `/` from a 101-byte path
+    ///   that Go's `archive/tar` split across prefix and name), or is a
+    ///   different path entirely (hardlink promotion reuses the target's
+    ///   header). GNU headers have no prefix field.
+    fn header_for_emit(&self) -> Header {
+        let mut header = self.header.clone();
+        if let Some(ustar) = header.as_ustar_mut() {
+            ustar.prefix.fill(0);
+        }
+        header
+    }
+
     /// Write a hardlink entry to `builder` pointing from `link_path` to
     /// `target_path`, using `self`'s header for inode metadata (mode, uid,
     /// gid, mtime).
@@ -207,7 +226,7 @@ impl CanonicalTarHeader {
                 .map_err(|e| anyhow!("failed to append PAX extensions for hardlink: {e}"))?;
         }
 
-        let mut header = self.header.clone();
+        let mut header = self.header_for_emit();
         header.set_entry_type(EntryType::Link);
         header.set_size(0);
 
@@ -269,7 +288,7 @@ impl CanonicalTarHeader {
                 )
                 .map_err(|e| anyhow!("failed to append PAX extensions: {e}"))?;
         }
-        let mut header = self.header.clone();
+        let mut header = self.header_for_emit();
         builder
             .append_data(&mut header, path, data)
             .map_err(|e| anyhow!("failed to append entry: {e}"))?;

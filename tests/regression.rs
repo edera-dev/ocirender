@@ -10,7 +10,7 @@ use tar::{Builder, EntryType, Header};
 mod helpers;
 use helpers::{LayerBuilder, blob, merge, paths_in_tar};
 // regression.rs also uses:
-use helpers::hardlink_target_in_tar;
+use helpers::{file_contents_in_tar, hardlink_target_in_tar};
 
 // ─── Regression tests ────────────────────────────────────────────────────────
 
@@ -368,5 +368,82 @@ fn regress_bare_dot_root_entry_skipped() {
     assert!(
         paths.iter().any(|p| p == "sbin/mkswap"),
         "real file following the `.` entry must still be emitted"
+    );
+}
+
+/// Bug: `write_to_tar` cloned the source entry's header and let `append_data` set the path, but
+/// `append_data` only writes the USTAR `prefix` field when it has to split a path over 100 bytes.
+/// Go's `archive/tar` splits any 101..=256-byte path across prefix and name, so a 101-byte
+/// `/nix/store/<pkg>/share/<file>` normalised to a 100-byte relative path that fit in `name`, the
+/// stale `/nix/store/<pkg>/share` prefix stayed behind, and readers saw
+/// `/nix/store/<pkg>/share/nix/store/<pkg>/share/<file>`. mksquashfs silently misplaced such
+/// files, or aborted with "exists in the tar file as both a directory and non-directory".
+///
+/// Discovered via: nix2container images, whose layers are written by Go's `archive/tar`.
+/// `./`-prefixed paths hit the same bug at 101 or 102 bytes.
+#[test]
+fn regress_stale_ustar_prefix_after_leading_slash_strip() {
+    let store_dir = format!("nix/store/{}-pkg-1.0/share", "a".repeat(32));
+    for lead in ["/", "./"] {
+        let prefix = format!("{lead}{store_dir}");
+        // Pad the name so the source path, prefix + '/' + name, is 101 bytes.
+        let name = "f".repeat(101 - prefix.len() - 1);
+        let expected = format!("{store_dir}/{name}");
+        assert!(
+            expected.len() <= 100,
+            "test setup: normalised path must fit in the USTAR name field"
+        );
+
+        let layer = LayerBuilder::new()
+            .add_file_ustar_split(&prefix, &name, b"hello", 0o644)
+            .finish();
+        let merged = merge(vec![blob(layer, 0)]);
+
+        assert_eq!(
+            paths_in_tar(&merged),
+            [expected.as_str()],
+            "{lead:?}-prefixed path must be emitted at its normalised path, not under the \
+             source entry's USTAR prefix"
+        );
+        assert_eq!(
+            file_contents_in_tar(&merged, &expected).as_deref(),
+            Some(&b"hello"[..])
+        );
+    }
+}
+
+/// Variant of the above that does not depend on the path length changing: hardlink promotion
+/// emits the surviving links with the whited-out target's header, so a target whose path was
+/// split across USTAR prefix and name leaked that prefix onto the (short) link paths, through
+/// both `write_to_tar` (the promoted primary) and `write_hardlink_to_tar` (the other links in
+/// the group).
+#[test]
+fn regress_stale_ustar_prefix_on_hardlink_promotion() {
+    let prefix = format!("usr/lib/{}", "d".repeat(100));
+    let name = "libfoo.so.1";
+    let target = format!("{prefix}/{name}");
+
+    let layer0 = LayerBuilder::new()
+        .add_file_ustar_split(&prefix, name, b"elf", 0o755)
+        .add_hardlink("bin/a", &target)
+        .add_hardlink("bin/b", &target)
+        .finish();
+    let layer1 = LayerBuilder::new().add_whiteout(&prefix, name).finish();
+    let merged = merge(vec![blob(layer0, 0), blob(layer1, 1)]);
+
+    let mut paths = paths_in_tar(&merged);
+    paths.sort();
+    assert_eq!(
+        paths,
+        ["bin/a", "bin/b"],
+        "promoted links must land at their own paths, not under the target's USTAR prefix"
+    );
+    assert_eq!(
+        file_contents_in_tar(&merged, "bin/a").as_deref(),
+        Some(&b"elf"[..])
+    );
+    assert_eq!(
+        hardlink_target_in_tar(&merged, "bin/b").as_deref(),
+        Some("bin/a")
     );
 }

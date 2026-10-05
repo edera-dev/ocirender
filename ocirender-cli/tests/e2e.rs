@@ -23,7 +23,7 @@
 
 mod fixtures;
 
-use fixtures::generate_fixtures;
+use fixtures::{generate_fixtures, generate_go_ustar_image};
 
 use std::{
     path::{Path, PathBuf},
@@ -393,6 +393,46 @@ fn e2e_root_directory_permissions() {
     assert_eq!(
         owner, "root/root",
         "squashfs root directory should be owned by root/root; got {root_line:?}"
+    );
+}
+
+/// A layer written by Go's `archive/tar` (as nix2container does) must pack
+/// into squashfs with every file at its own path.
+///
+/// Guards against a stale USTAR prefix doubling a 101-byte `/nix/store/...`
+/// path once its leading `/` is stripped, which mksquashfs then silently
+/// honours.
+#[test]
+fn e2e_go_archive_tar_layer_squashfs() {
+    require_binaries();
+    let work = TempDir::new().unwrap();
+    let image = generate_go_ustar_image(work.path()).expect("generating Go-style image");
+    let squashfs = convert_squashfs(&image.oci_layout, work.path(), "go-ustar");
+
+    let out = Command::new("unsquashfs")
+        .args(["-lln", squashfs.to_str().unwrap()])
+        .output()
+        .expect("spawning unsquashfs -lln");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // Map each regular file to its numeric "uid/gid" owner column.
+    let files: std::collections::BTreeMap<&str, &str> = stdout
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            match fields[..] {
+                [mode, owner, _, _, _, path] if mode.starts_with('-') => {
+                    Some((path.strip_prefix("squashfs-root/")?, owner))
+                }
+                _ => None,
+            }
+        })
+        .collect();
+
+    let expected = std::collections::BTreeMap::from([(image.split_path_file.as_str(), "0/0")]);
+    assert_eq!(
+        files, expected,
+        "files must sit at their own paths; unsquashfs -lln:\n{stdout}"
     );
 }
 

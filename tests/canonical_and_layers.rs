@@ -3,7 +3,8 @@
 //! canonical.rs: focuses on write_hardlink_to_tar's PAX extension ordering —
 //! the property that linkpath lands on the main entry, not on a GNU LongName
 //! auxiliary entry that would consume the extensions before the reader sees
-//! the hardlink itself.
+//! the hardlink itself. Also which fields of a source entry's header must not
+//! carry over when it is re-emitted at another path.
 //!
 //! layers.rs: the unsupported media type error path in open_layer.
 
@@ -13,11 +14,9 @@ use tempfile::NamedTempFile;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Build a tar containing a single hardlink entry via `write_hardlink_to_tar`
-/// and return the raw bytes.
-fn hardlink_tar(link_path: &str, target_path: &str) -> Vec<u8> {
-    // Build a minimal CanonicalTarHeader representing the inode metadata.
-    // Entry type and link fields will be overwritten by write_hardlink_to_tar.
+/// A minimal regular-file header standing in for the source entry whose inode
+/// metadata the written entry reuses.
+fn src_header() -> tar::Header {
     let mut src_header = tar::Header::new_ustar();
     src_header.set_entry_type(EntryType::Regular);
     src_header.set_size(0);
@@ -27,12 +26,36 @@ fn hardlink_tar(link_path: &str, target_path: &str) -> Vec<u8> {
     src_header.set_gid(0);
     src_header.set_path("placeholder").unwrap();
     src_header.set_cksum();
+    src_header
+}
 
-    let canonical = CanonicalTarHeader {
-        header: src_header,
-        pax_extensions: vec![],
-    };
+/// A source header as Go's `archive/tar` writes it for a 101..=256-byte path:
+/// split across the USTAR prefix and name fields.
+fn split_src_header() -> tar::Header {
+    let mut h = src_header();
+    let ustar = h.as_ustar_mut().unwrap();
+    ustar.prefix.fill(0);
+    ustar.prefix[..14].copy_from_slice(b"/nix/store/abc");
+    h.set_cksum();
+    h
+}
 
+/// Build a tar containing a single hardlink entry via `write_hardlink_to_tar`
+/// and return the raw bytes.
+fn hardlink_tar(link_path: &str, target_path: &str) -> Vec<u8> {
+    hardlink_tar_from(
+        CanonicalTarHeader {
+            header: src_header(),
+            pax_extensions: vec![],
+        },
+        link_path,
+        target_path,
+    )
+}
+
+/// As [`hardlink_tar`], with `canonical` supplying the inode metadata. Entry
+/// type and link fields are overwritten by write_hardlink_to_tar.
+fn hardlink_tar_from(canonical: CanonicalTarHeader, link_path: &str, target_path: &str) -> Vec<u8> {
     let mut out = Vec::new();
     let mut builder = Builder::new(&mut out);
     canonical
@@ -42,6 +65,19 @@ fn hardlink_tar(link_path: &str, target_path: &str) -> Vec<u8> {
             &mut builder,
         )
         .expect("write_hardlink_to_tar must succeed");
+    builder.finish().unwrap();
+    drop(builder);
+    out
+}
+
+/// Build a tar containing a single empty entry written at `path` via
+/// `write_to_tar` with `canonical`'s header, and return the raw bytes.
+fn file_tar_from(canonical: CanonicalTarHeader, path: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut builder = Builder::new(&mut out);
+    canonical
+        .write_to_tar(std::path::Path::new(path), &[] as &[u8], &mut builder)
+        .expect("write_to_tar must succeed");
     builder.finish().unwrap();
     drop(builder);
     out
@@ -170,6 +206,41 @@ fn write_hardlink_long_paths_produce_no_gnu_longname_entry() {
              its presence would cause linkpath to be consumed by the wrong entry"
         );
     }
+}
+
+/// The source header's USTAR prefix must not leak onto the hardlink's path.
+#[test]
+fn write_hardlink_drops_source_prefix() {
+    let canonical = CanonicalTarHeader {
+        header: split_src_header(),
+        pax_extensions: vec![],
+    };
+    let tar = hardlink_tar_from(canonical, "bin/link", "bin/target");
+    let entry = first_main_entry(&tar);
+
+    assert_eq!(
+        entry.path().unwrap().to_string_lossy(),
+        "bin/link",
+        "stale USTAR prefix must not be prepended to the link path"
+    );
+}
+
+/// `write_to_tar` at a path that fits in the USTAR name field must not keep
+/// the source header's prefix.
+#[test]
+fn write_to_tar_drops_source_prefix() {
+    let canonical = CanonicalTarHeader {
+        header: split_src_header(),
+        pax_extensions: vec![],
+    };
+    let tar = file_tar_from(canonical, "bin/file");
+    let entry = first_main_entry(&tar);
+
+    assert_eq!(
+        entry.path().unwrap().to_string_lossy(),
+        "bin/file",
+        "stale USTAR prefix must not be prepended to the path"
+    );
 }
 
 // ── layers.rs: open_layer ─────────────────────────────────────────────────────
