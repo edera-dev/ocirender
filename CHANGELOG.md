@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/edera-dev/ocirender/compare/v0.2.2...v0.2.3) - 2026-10-05
+
+### Added
+
+- *(image)* accept a bare image manifest as manifest.json
+- *(ci)* add 'cargo hack check --rust-version' to checks
+
+### Fixed
+
+- *(overlay)* emit deferred hardlinks with their resolved target
+- *(canonical)* keep link targets from GNU long-link records
+- *(overlay)* expand PAX-format sparse files into regular files
+- *(overlay)* emit old-GNU sparse entries as regular files
+- *(canonical)* drop owner names so ownership follows uid/gid
+- *(canonical)* write 100-byte hardlink paths in full
+- *(canonical)* clear stale ustar prefix when re-emitting entries
+
+### Other
+
+- *(deps)* bump step-security/harden-runner from 2.20.0 to 2.21.1
+- *(deps)* bump release-plz/action from 0.5.131 to 0.5.139
+- lint test targets with clippy
+- fix clippy lints in test code
+- *(cargo)* update dependencies, set rust-version in Cargo.toml
+
 ## [0.2.2](https://github.com/edera-dev/ocirender/compare/v0.2.1...v0.2.2) - 2026-07-24
 
 ### Fixed
