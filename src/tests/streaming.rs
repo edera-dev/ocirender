@@ -1,7 +1,7 @@
 //! Tests for the streaming merge paths in lib.rs.
 //!
-//! These tests exercise `merge_layers_into_streaming` directly (via
-//! `convert_tar_streaming`) and the `StreamingPacker` async API.  No
+//! These tests exercise `merge_layers_into_streaming`, directly and through
+//! `convert_streaming`, and the `StreamingPacker` async API.  No
 //! mksquashfs binary is required — all StreamingPacker tests use
 //! `ImageSpec::Tar` or `ImageSpec::Dir` so correctness can be verified
 //! by inspecting the output directly.
@@ -331,21 +331,21 @@ fn streaming_empty_channel_close_returns_error() {
 // ─── Error handling: output file not left behind on error ────────────────────
 
 #[test]
-fn convert_tar_streaming_no_partial_file_on_channel_error() {
+fn convert_streaming_no_partial_file_on_layer_source_error() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let out = NamedTempFile::new().unwrap();
         let out_path = out.path().to_path_buf();
         drop(out);
 
-        let (tx, rx) = tokio::sync::mpsc::channel(4);
-        tx.send(Err("injection error".into())).await.unwrap();
-        drop(tx);
-
-        let result = crate::convert_tar_streaming(rx, 1, &out_path).await;
+        let layers = tokio_stream::iter([Err::<LayerBlob, _>("injection error")]);
+        let spec = ImageSpec::Tar {
+            path: out_path.clone(),
+        };
+        let result = crate::convert_streaming(layers, 1, spec).await;
         assert!(
-            result.is_err(),
-            "convert_tar_streaming must return an error"
+            matches!(&result, Err(Error::LayerSource(e)) if e.to_string() == "injection error"),
+            "the stream's own error must be returned; got {result:?}"
         );
         assert!(
             !out_path.exists(),
@@ -355,25 +355,61 @@ fn convert_tar_streaming_no_partial_file_on_channel_error() {
 }
 
 #[test]
-fn convert_tar_streaming_no_partial_file_on_premature_close() {
+fn convert_streaming_no_partial_file_on_premature_end() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let out = NamedTempFile::new().unwrap();
         let out_path = out.path().to_path_buf();
         drop(out);
 
-        let (tx, rx) = tokio::sync::mpsc::channel(4);
         let layer0 = LayerBuilder::new().add_file("a.txt", b"a", 0o644).finish();
-        tx.send(Ok(blob(layer0, 0))).await.unwrap();
-        drop(tx);
-
-        let result = crate::convert_tar_streaming(rx, 2, &out_path).await;
-        assert!(result.is_err(), "premature close must return an error");
+        let layers = tokio_stream::iter([Ok::<_, BoxError>(blob(layer0, 0))]);
+        let spec = ImageSpec::Tar {
+            path: out_path.clone(),
+        };
+        let result = crate::convert_streaming(layers, 2, spec).await;
+        assert!(
+            matches!(
+                result,
+                Err(Error::MissingLayers {
+                    received: 1,
+                    expected: 2
+                })
+            ),
+            "a stream ending early must be an error; got {result:?}"
+        );
         assert!(
             !out_path.exists(),
             "partial output file must be removed after premature close"
         );
     });
+}
+
+/// Any `Stream` of layers works, arriving in any order; one that cannot fail
+/// is mapped to `Ok` with an uninhabited error type.
+#[tokio::test]
+async fn convert_streaming_merges_an_infallible_stream_in_any_order() {
+    use tokio_stream::StreamExt;
+
+    let (l0, l1, l2) = three_layer_fixture();
+    let blobs = vec![blob(l1, 1), blob(l0, 0), blob(l2, 2)];
+    let layers = tokio_stream::iter(blobs).map(Ok::<_, std::convert::Infallible>);
+    let out = NamedTempFile::new().unwrap();
+    let spec = ImageSpec::Tar {
+        path: out.path().to_path_buf(),
+    };
+
+    crate::convert_streaming(layers, 3, spec).await.unwrap();
+
+    let merged = std::fs::read(out.path()).unwrap();
+    assert_eq!(
+        file_contents_in_tar(&merged, "base.txt").as_deref(),
+        Some(&b"new"[..])
+    );
+    assert!(
+        file_contents_in_tar(&merged, "keep.txt").is_none(),
+        "whited-out file must be absent"
+    );
 }
 
 // ─── StreamingPacker: Tar output ─────────────────────────────────────────────

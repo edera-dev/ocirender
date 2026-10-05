@@ -24,6 +24,7 @@ rust-version  = "1.88"
 [dependencies]
 bzip2      = "0.6"
 flate2     = { version = "1", features = ["zlib-rs"], default-features = false }
+futures-core = "0.3"
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2       = "0.11"
@@ -36,6 +37,7 @@ zstd       = "0.13"
 
 [dev-dependencies]
 tokio    = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
 libc     = "0.2"
 oci-spec = { version = "0.10", features = ["image"] }
 

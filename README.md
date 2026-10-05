@@ -151,11 +151,18 @@ in any order; the merge engine resequences them and processes each as soon as
 its turn arrives.
 
 ```rust
-// Streaming convenience wrappers.
-pub async fn convert_mksquashfs_streaming(receiver, total_layers, output, binpath) -> Result<()>
-pub async fn convert_tar_streaming(receiver, total_layers, output_tar) -> Result<()>
-pub async fn convert_dir_streaming(receiver, total_layers, output_dir) -> Result<()>
+// Convert from any stream of layers: Ok(LayerBlob) as each becomes available,
+// or Err(e) for a layer the caller failed to supply, which aborts the
+// conversion with Error::LayerSource.
+pub async fn convert_streaming<S, E>(layers: S, total_layers: usize, spec: ImageSpec) -> Result<()>
+where
+    S: Stream<Item = Result<LayerBlob, E>> + Send + 'static,
+    E: Into<BoxError> + 'static;
 ```
+
+`Stream` is the standard `futures-core` trait, so a `tokio-stream`
+`ReceiverStream`, a `futures` channel, or any stream combinator works. A
+stream that cannot fail can be passed as `stream.map(Ok::<_, Infallible>)`.
 
 #### `StreamingPacker`
 

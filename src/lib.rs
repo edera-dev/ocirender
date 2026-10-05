@@ -22,9 +22,9 @@
 //! convenience wrappers ([`convert_mksquashfs`], [`convert_tar`],
 //! [`convert_dir`]).
 //!
-//! When layers are being downloaded concurrently, use [`StreamingPacker`] or
-//! one of the `_streaming` convenience wrappers. These accept layers in any
-//! arrival order; the merge engine resequences them internally and processes
+//! When layers are being downloaded concurrently, pass them as a stream to
+//! [`convert_streaming`], or push them to a [`StreamingPacker`]. Both accept
+//! layers in any arrival order; the merge engine resequences them internally and processes
 //! each layer as soon as its turn arrives, keeping the output sink busy while
 //! remaining layers are still in flight.
 //!
@@ -49,6 +49,7 @@ pub mod verify;
 mod tests;
 
 pub use error::{BoxError, Error, Result};
+use futures_core::Stream;
 pub use image::LayerBlob;
 
 /// One layer delivered to the merge, or the caller's failure to deliver one.
@@ -304,68 +305,68 @@ pub async fn convert_dir(image_dir: &Path, output_dir: &Path) -> Result<()> {
     .await
 }
 
-// ── Streaming compatibility wrappers ─────────────────────────────────────────
+// ── Streaming conversion ──────────────────────────────────────────────────────
 
-/// Streaming variant of [`convert_mksquashfs`].
+/// Convert an image whose layers arrive as a stream into the format and
+/// location described by `spec`.
 ///
-/// Layers are delivered via `receiver` as downloads complete, in any order.
-/// An error sent as `Err` aborts the merge with [`Error::LayerSource`] and
-/// cleans up the partial output file.
-pub async fn convert_mksquashfs_streaming(
-    receiver: tokio::sync::mpsc::Receiver<Result<LayerBlob, BoxError>>,
-    total_layers: usize,
-    output_squashfs: &Path,
-    squashfs_binpath: Option<&Path>,
-) -> Result<()> {
-    let spec = ImageSpec::Squashfs {
-        path: output_squashfs.to_path_buf(),
-        binpath: squashfs_binpath.map(Path::to_path_buf),
-    };
+/// `layers` yields each of the image's `total_layers` layers exactly once, as
+/// it becomes available (for example as each download completes), in any
+/// order; the merge resequences them and processes each as soon as its turn
+/// comes (see [`StreamingPacker`] on choosing a download order). An `Err` item
+/// is the caller failing to supply a layer: it aborts the conversion with
+/// [`Error::LayerSource`], which carries it as its source. A stream that ends
+/// early fails with [`Error::MissingLayers`]. On failure a partial tar or
+/// squashfs output is removed; a partially populated directory is left in
+/// place for the caller to clean up.
+///
+/// A stream of layers that cannot fail can be passed as
+/// `stream.map(Ok::<_, std::convert::Infallible>)`.
+///
+/// ```no_run
+/// # use ocirender::{ImageSpec, LayerBlob};
+/// # async fn example(downloads: Vec<LayerBlob>) -> ocirender::Result<()> {
+/// let total = downloads.len();
+/// let (tx, rx) = tokio::sync::mpsc::channel(4);
+/// tokio::spawn(async move {
+///     // As each layer finishes downloading (or fails to):
+///     for blob in downloads {
+///         let _ = tx.send(Ok::<_, std::io::Error>(blob)).await;
+///     }
+/// });
+/// let layers = tokio_stream::wrappers::ReceiverStream::new(rx);
+/// let spec = ImageSpec::Tar { path: "image.tar".into() };
+/// ocirender::convert_streaming(layers, total, spec).await
+/// # }
+/// ```
+pub async fn convert_streaming<S, E>(layers: S, total_layers: usize, spec: ImageSpec) -> Result<()>
+where
+    S: Stream<Item = Result<LayerBlob, E>> + Send + 'static,
+    E: Into<BoxError> + 'static,
+{
     let (std_tx, std_rx) = std::sync::mpsc::channel();
-    tokio::spawn(relay_to_blocking(receiver, std_tx));
+    tokio::spawn(relay_stream(layers, std_tx));
     join(tokio::task::spawn_blocking(move || {
         write_for_spec(std_rx, total_layers, spec, None)
     }))
     .await
 }
 
-/// Streaming variant of [`convert_tar`].
+/// Relay a stream of layers to a std channel for the blocking merge thread.
 ///
-/// On error the partially written output file is removed.
-pub async fn convert_tar_streaming(
-    receiver: tokio::sync::mpsc::Receiver<Result<LayerBlob, BoxError>>,
-    total_layers: usize,
-    output_tar: &Path,
-) -> Result<()> {
-    let spec = ImageSpec::Tar {
-        path: output_tar.to_path_buf(),
-    };
-    let (std_tx, std_rx) = std::sync::mpsc::channel();
-    tokio::spawn(relay_to_blocking(receiver, std_tx));
-    join(tokio::task::spawn_blocking(move || {
-        write_for_spec(std_rx, total_layers, spec, None)
-    }))
-    .await
-}
-
-/// Streaming variant of [`convert_dir`].
-///
-/// On error the partially populated output directory is left in place —
-/// callers are responsible for cleanup.
-pub async fn convert_dir_streaming(
-    receiver: tokio::sync::mpsc::Receiver<Result<LayerBlob, BoxError>>,
-    total_layers: usize,
-    output_dir: &Path,
-) -> Result<()> {
-    let spec = ImageSpec::Dir {
-        path: output_dir.to_path_buf(),
-    };
-    let (std_tx, std_rx) = std::sync::mpsc::channel();
-    tokio::spawn(relay_to_blocking(receiver, std_tx));
-    join(tokio::task::spawn_blocking(move || {
-        write_for_spec(std_rx, total_layers, spec, None)
-    }))
-    .await
+/// Runs as a detached task. It ends when the stream does, which closes the
+/// channel, or once the merge has stopped and dropped its end.
+async fn relay_stream<S, E>(layers: S, tx: std::sync::mpsc::Sender<LayerItem>)
+where
+    S: Stream<Item = Result<LayerBlob, E>>,
+    E: Into<BoxError>,
+{
+    let mut layers = std::pin::pin!(layers);
+    while let Some(item) = std::future::poll_fn(|cx| layers.as_mut().poll_next(cx)).await {
+        if tx.send(item.map_err(Into::into)).is_err() {
+            break;
+        }
+    }
 }
 
 // ── StreamingPacker ───────────────────────────────────────────────────────────
