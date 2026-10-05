@@ -47,9 +47,11 @@ runs:
       shell: bash
       run: cargo fmt --all -- --check
 
+    # --all-targets lints the test code too, and the e2e/network features
+    # bring the feature-gated e2e test target and network tests into scope.
     - name: cargo clippy
       shell: bash
-      run: cargo clippy -- -D warnings
+      run: cargo clippy --all-targets --features ocirender-cli/e2e,ocirender-cli/network -- -D warnings
 
     - name: cargo doc
       shell: bash
