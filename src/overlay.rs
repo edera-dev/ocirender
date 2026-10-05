@@ -32,21 +32,95 @@
 //! descending run that is now ready to process. This means a single
 //! out-of-order arrival can unblock multiple waiting layers at once.
 
-use anyhow::{Context, Result};
 use std::{
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 use tar::{Builder, EntryType};
 
 use crate::{
-    PackerProgress,
+    LayerItem, PackerProgress,
     canonical::CanonicalTarHeader,
+    error::Error,
     image::LayerBlob,
     layers::open_layer,
     sparse::PaxSparse,
     tracker::{EmittedPathTracker, HardLinkTracker, WhiteoutTracker},
 };
+
+/// Why a merge stopped.
+#[derive(Debug)]
+pub enum MergeError {
+    /// The input failed: a layer could not be read, or the layer source
+    /// failed or ran out. This is the error to report.
+    Input(Error),
+    /// Writing the merged stream to the sink failed. What that means is up to
+    /// the sink: for mksquashfs, a broken pipe usually means it exited first.
+    Output(io::Error),
+}
+
+impl From<Error> for MergeError {
+    fn from(e: Error) -> Self {
+        Self::Input(e)
+    }
+}
+
+impl MergeError {
+    /// The error to report, for a sink whose only failure mode is writing to
+    /// `output`.
+    pub fn into_error(self, output: &Path) -> Error {
+        match self {
+            Self::Input(e) => e,
+            Self::Output(e) => Error::output(output, e),
+        }
+    }
+}
+
+fn layer_error(blob: &LayerBlob, message: impl Into<String>, e: io::Error) -> MergeError {
+    MergeError::Input(Error::layer(blob, message, e))
+}
+
+/// A writer that records whether it has failed.
+///
+/// Writing an entry copies its data from the layer to the sink, and
+/// `tar::Builder` reports a failure on either side, or an entry it cannot
+/// encode at all, as the same kind of `io::Error`. Wrapping the sink tells
+/// them apart: only an error the sink itself returned is an output failure,
+/// and anything else is the layer's.
+pub struct TrackedWriter<W> {
+    inner: W,
+    failed: bool,
+}
+
+impl<W> TrackedWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            failed: false,
+        }
+    }
+
+    fn note<T>(&mut self, result: io::Result<T>) -> io::Result<T> {
+        if let Err(e) = &result
+            && e.kind() != io::ErrorKind::Interrupted
+        {
+            self.failed = true;
+        }
+        result
+    }
+}
+
+impl<W: Write> Write for TrackedWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let result = self.inner.write(buf);
+        self.note(result)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let result = self.inner.flush();
+        self.note(result)
+    }
+}
 
 /// Process a single layer blob: record whiteouts, defer hardlinks, and stream
 /// all other non-suppressed, non-duplicate entries into `output`.
@@ -59,32 +133,37 @@ fn process_layer<W: Write>(
     whiteout: &mut WhiteoutTracker,
     emitted: &mut EmittedPathTracker,
     hardlinks: &mut HardLinkTracker,
-    output: &mut Builder<W>,
-) -> Result<()> {
+    output: &mut Builder<TrackedWriter<W>>,
+) -> Result<(), MergeError> {
     let mut archive = open_layer(&blob.path, &blob.media_type)
-        .with_context(|| format!("opening layer {}", blob.path.display()))?;
+        .map_err(|e| layer_error(blob, "cannot open layer", e))?;
 
-    let entries = archive.entries().context("reading tar entries")?;
+    let entries = archive
+        .entries()
+        .map_err(|e| layer_error(blob, "reading tar entries", e))?;
     for entry_result in entries {
-        let mut entry = entry_result.context("reading tar entry")?;
-        let mut canonical =
-            CanonicalTarHeader::from_entry(&mut entry).context("capturing entry header")?;
+        let mut entry = entry_result.map_err(|e| layer_error(blob, "reading tar entry", e))?;
+        let mut canonical = CanonicalTarHeader::from_entry(&mut entry)
+            .map_err(|e| layer_error(blob, "reading entry header", e))?;
 
         // A PAX-format sparse file stands for a plain regular file: handle it
         // as one, under its real path and with its holes filled back in.
-        let pax_sparse =
-            PaxSparse::detect(&canonical.pax_extensions).context("reading PAX sparse records")?;
+        let pax_sparse = PaxSparse::detect(&canonical.pax_extensions)
+            .map_err(|e| layer_error(blob, "reading PAX sparse records", e))?;
         let raw_path = match pax_sparse.as_ref().and_then(PaxSparse::name) {
             Some(name) => name.to_path_buf(),
-            None => entry.path().context("entry path")?.into_owned(),
+            None => entry
+                .path()
+                .map_err(|e| layer_error(blob, "reading entry path", e))?
+                .into_owned(),
         };
         let path = normalize_path(&raw_path);
         let mut data: Box<dyn Read + '_> = match pax_sparse {
             Some(sparse) => {
                 sparse.rewrite_header(&mut canonical);
-                let data = sparse
-                    .expand(&mut entry)
-                    .with_context(|| format!("expanding sparse file {}", path.display()))?;
+                let data = sparse.expand(&mut entry).map_err(|e| {
+                    layer_error(blob, format!("expanding sparse file {}", path.display()), e)
+                })?;
                 Box::new(data)
             }
             None => Box::new(&mut entry),
@@ -125,7 +204,7 @@ fn process_layer<W: Write>(
             ) {
                 let mut buffered = Vec::new();
                 data.read_to_end(&mut buffered)
-                    .context("buffering suppressed file content")?;
+                    .map_err(|e| layer_error(blob, format!("reading {}", path.display()), e))?;
                 hardlinks.note_suppressed_file(path, canonical, buffered);
             }
             // Directories, symlinks, and hardlinks pointing at suppressed
@@ -141,8 +220,14 @@ fn process_layer<W: Write>(
         if canonical.entry_type() == EntryType::Link {
             let link_target = canonical
                 .link_name()
-                .context("reading hard link target")?
-                .context("hard link has no target")?;
+                .map_err(|e| layer_error(blob, "reading hard link target", e))?
+                .ok_or_else(|| {
+                    layer_error(
+                        blob,
+                        format!("hard link {} has no target", path.display()),
+                        io::Error::from(io::ErrorKind::InvalidData),
+                    )
+                })?;
             let target_path = normalize_path(&link_target);
 
             // The link path will ultimately surface in the output as a
@@ -166,9 +251,13 @@ fn process_layer<W: Write>(
             continue;
         }
 
-        canonical
-            .write_to_tar(&path, data, output)
-            .with_context(|| format!("emitting {}", path.display()))?;
+        if let Err(e) = canonical.write_to_tar(&path, &mut data, output) {
+            return Err(if output.get_ref().failed {
+                MergeError::Output(e)
+            } else {
+                layer_error(blob, format!("cannot emit {}", path.display()), e)
+            });
+        }
         emitted.insert(&path);
 
         // When a non-directory wins at path P, older-layer entries under
@@ -203,8 +292,8 @@ fn process_layer<W: Write>(
 fn emit_deferred<W: Write>(
     hardlinks: HardLinkTracker,
     emitted: &mut EmittedPathTracker,
-    output: &mut Builder<W>,
-) -> Result<()> {
+    output: &mut Builder<TrackedWriter<W>>,
+) -> io::Result<()> {
     let (deferred, promotions) = hardlinks.drain_sorted();
 
     // ── Promotions ───────────────────────────────────────────────────────────
@@ -245,9 +334,7 @@ fn emit_deferred<W: Write>(
         let primary_link_path = group[primary_idx].link_path.clone();
         let (file_canonical, data) = group[primary_idx].file_data.as_ref().unwrap();
         let regular_canonical = file_canonical.clone_as_regular();
-        regular_canonical
-            .write_to_tar(&primary_link_path, data.as_slice(), output)
-            .with_context(|| format!("emitting promoted entry {}", primary_link_path.display()))?;
+        regular_canonical.write_to_tar(&primary_link_path, data.as_slice(), output)?;
         emitted.insert(&primary_link_path);
 
         for (i, promo) in group.iter().enumerate() {
@@ -262,15 +349,7 @@ fn emit_deferred<W: Write>(
                 .as_ref()
                 .map(|(c, _)| c)
                 .unwrap_or(file_canonical);
-            base_canonical
-                .write_hardlink_to_tar(&promo.link_path, &primary_link_path, output)
-                .with_context(|| {
-                    format!(
-                        "emitting within-group hardlink {} → {}",
-                        promo.link_path.display(),
-                        primary_link_path.display()
-                    )
-                })?;
+            base_canonical.write_hardlink_to_tar(&promo.link_path, &primary_link_path, output)?;
             emitted.insert(&promo.link_path);
         }
     }
@@ -288,8 +367,7 @@ fn emit_deferred<W: Write>(
         // extraction root, and the `tar` crate (behind the dir output) refuses
         // an absolute one.
         hl.canonical
-            .write_hardlink_to_tar(&hl.link_path, &hl.target_path, output)
-            .with_context(|| format!("emitting hard link {}", hl.link_path.display()))?;
+            .write_hardlink_to_tar(&hl.link_path, &hl.target_path, output)?;
         emitted.insert(&hl.link_path);
     }
 
@@ -305,14 +383,14 @@ fn emit_deferred<W: Write>(
 /// Only the tests use it. Production code goes through the streaming path
 /// via `write_for_spec`.
 #[cfg(test)]
-pub fn merge_layers_into<W: Write>(mut layers: Vec<LayerBlob>, sink: W) -> Result<()> {
+pub fn merge_layers_into<W: Write>(mut layers: Vec<LayerBlob>, sink: W) -> Result<(), MergeError> {
     layers.sort_by_key(|l| std::cmp::Reverse(l.index));
 
     let mut whiteout = WhiteoutTracker::default();
     let mut emitted = EmittedPathTracker::default();
     let mut hardlinks = HardLinkTracker::default();
 
-    let mut output = Builder::new(sink);
+    let mut output = Builder::new(TrackedWriter::new(sink));
     output.mode(tar::HeaderMode::Complete);
 
     for blob in &layers {
@@ -325,14 +403,7 @@ pub fn merge_layers_into<W: Write>(mut layers: Vec<LayerBlob>, sink: W) -> Resul
         )?;
     }
 
-    emit_deferred(hardlinks, &mut emitted, &mut output)?;
-
-    output.finish()?;
-    // Flush and drop the Builder to close the write end of any pipe, signalling
-    // EOF to the consumer (e.g. mksquashfs).
-    let mut sink = output.into_inner()?;
-    sink.flush()?;
-    Ok(())
+    finish_output(hardlinks, &mut emitted, output).map_err(MergeError::Output)
 }
 
 /// Merge OCI layers into a single tar stream written to `sink`, accepting
@@ -343,24 +414,25 @@ pub fn merge_layers_into<W: Write>(mut layers: Vec<LayerBlob>, sink: W) -> Resul
 /// of a given layer begins as soon as all newer layers have been processed,
 /// regardless of when older layers arrive.
 ///
-/// A download error delivered as `Err` on the channel aborts the merge
-/// immediately and propagates the error to the caller. If the channel closes
-/// before all `total_layers` items are received, an error is returned.
+/// An `Err` delivered on the channel (the caller failing to supply a layer)
+/// aborts the merge immediately with [`Error::LayerSource`]. If the channel
+/// closes before all `total_layers` items are received, the merge fails with
+/// [`Error::MissingLayers`].
 ///
 /// `progress_tx`, if supplied, receives [`PackerProgress::LayerStarted`] and
 /// [`PackerProgress::LayerFinished`] events around each call to
 /// `process_layer`. Send failures are silently ignored.
 pub fn merge_layers_into_streaming<W: Write>(
-    receiver: std::sync::mpsc::Receiver<anyhow::Result<LayerBlob>>,
+    receiver: std::sync::mpsc::Receiver<LayerItem>,
     total_layers: usize,
     sink: W,
     progress_tx: Option<&std::sync::mpsc::SyncSender<PackerProgress>>,
-) -> Result<()> {
+) -> Result<(), MergeError> {
     let mut whiteout = WhiteoutTracker::default();
     let mut emitted = EmittedPathTracker::default();
     let mut hardlinks = HardLinkTracker::default();
 
-    let mut output = Builder::new(sink);
+    let mut output = Builder::new(TrackedWriter::new(sink));
     output.mode(tar::HeaderMode::Complete);
 
     // next_index is the layer we want to process next (counting down from
@@ -373,12 +445,13 @@ pub fn merge_layers_into_streaming<W: Write>(
     while received < total_layers {
         let blob = match receiver.recv() {
             Ok(Ok(blob)) => blob,
-            Ok(Err(e)) => return Err(e).context("download error received on streaming channel"),
+            Ok(Err(e)) => return Err(Error::LayerSource(e).into()),
             Err(_) => {
-                anyhow::bail!(
-                    "layer channel closed after {received} of {total_layers} layers; \
-                     sender dropped without completing all layers"
-                );
+                return Err(Error::MissingLayers {
+                    received,
+                    expected: total_layers,
+                }
+                .into());
             }
         };
         received += 1;
@@ -409,12 +482,20 @@ pub fn merge_layers_into_streaming<W: Write>(
         }
     }
 
-    emit_deferred(hardlinks, &mut emitted, &mut output)?;
+    finish_output(hardlinks, &mut emitted, output).map_err(MergeError::Output)
+}
 
+/// Emit the deferred hardlinks and promotions, then finish the archive and
+/// flush the sink. Dropping the sink afterwards closes the write end of any
+/// pipe, signalling EOF to its consumer (e.g. mksquashfs).
+fn finish_output<W: Write>(
+    hardlinks: HardLinkTracker,
+    emitted: &mut EmittedPathTracker,
+    mut output: Builder<TrackedWriter<W>>,
+) -> io::Result<()> {
+    emit_deferred(hardlinks, emitted, &mut output)?;
     output.finish()?;
-    let mut sink = output.into_inner()?;
-    sink.flush()?;
-    Ok(())
+    output.into_inner()?.flush()
 }
 
 /// Normalise a tar entry path by stripping any leading `./` or `/` prefix.

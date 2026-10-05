@@ -18,11 +18,13 @@
 //! [`resolve_layers`], which turns the manifest's layer descriptors into
 //! [`LayerBlob`] values ready for the merge pipeline.
 
-use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+
+use crate::error::{Error, Result};
 
 /// Top-level OCI image index (`index.json`).
 ///
@@ -89,9 +91,10 @@ fn is_manifest_media_type(mt: &str) -> bool {
 /// layer — for example, minimal Docker save layouts that omit `LayerSources`.
 /// Returns a static OCI media type string.
 pub fn detect_media_type(path: &Path) -> Result<&'static str> {
-    let mut f = std::fs::File::open(path)?;
     let mut magic = [0u8; 4];
-    f.read_exact(&mut magic)?;
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .map_err(|e| Error::image_layout(path, "cannot read layer blob", e))?;
     Ok(match magic {
         [0x1f, 0x8b, ..] => "application/vnd.oci.image.layer.v1.tar+gzip",
         [0x28, 0xb5, 0x2f, 0xfd] => "application/vnd.oci.image.layer.v1.tar+zstd",
@@ -114,37 +117,32 @@ pub fn detect_media_type(path: &Path) -> Result<&'static str> {
 pub fn load_manifest(image_dir: &Path) -> Result<OciManifest> {
     let index_path = image_dir.join("index.json");
     if index_path.exists() {
-        let data = std::fs::read_to_string(&index_path)
-            .with_context(|| format!("reading {}", index_path.display()))?;
-        let index: OciIndex = serde_json::from_str(&data).context("parsing index.json")?;
-        let desc = index
-            .manifests
-            .into_iter()
-            .next()
-            .context("index.json has no manifests")?;
-        return load_manifest_blob(image_dir, &desc).context("loading manifest from index.json");
+        let index: OciIndex = read_json(&index_path, "image index")?;
+        let desc = index.manifests.into_iter().next().ok_or_else(|| {
+            Error::image_layout_msg(&index_path, "the image index lists no manifests")
+        })?;
+        return load_manifest_blob(image_dir, &desc, &index_path);
     }
 
     let manifest_path = image_dir.join("manifest.json");
     if manifest_path.exists() {
-        let data = std::fs::read_to_string(&manifest_path).context("reading manifest.json")?;
-        let root: serde_json::Value =
-            serde_json::from_str(&data).context("parsing manifest.json")?;
+        let root: serde_json::Value = read_json(&manifest_path, "JSON document")?;
         // `docker save` writes an array, one entry per tagged image. A lone
         // object is instead a single image manifest, OCI or Docker schema 2
         // alike, as in a layout assembled from a registry's responses rather
         // than exported by a tool.
         return if root.is_array() {
-            docker_save_manifest(root)
+            docker_save_manifest(&manifest_path, root)
         } else {
-            serde_json::from_value(root).context("parsing manifest.json as an image manifest")
+            serde_json::from_value(root)
+                .map_err(|e| Error::image_layout(&manifest_path, "not a valid image manifest", e))
         };
     }
 
-    bail!(
-        "no index.json or manifest.json found in {}",
-        image_dir.display()
-    );
+    Err(Error::image_layout_msg(
+        image_dir,
+        "no index.json or manifest.json found",
+    ))
 }
 
 /// Normalise a Docker save `manifest.json` into an [`OciManifest`].
@@ -153,7 +151,7 @@ pub fn load_manifest(image_dir: &Path) -> Result<OciManifest> {
 /// it is an array of objects (one per tagged image), each with a `Layers`
 /// array of relative blob paths and an optional `LayerSources` map that
 /// carries media types. Only the first image in the array is processed.
-fn docker_save_manifest(root: serde_json::Value) -> Result<OciManifest> {
+fn docker_save_manifest(path: &Path, root: serde_json::Value) -> Result<OciManifest> {
     #[derive(Deserialize)]
     struct LayerSource {
         #[serde(rename = "mediaType")]
@@ -171,12 +169,12 @@ fn docker_save_manifest(root: serde_json::Value) -> Result<OciManifest> {
         layer_sources: HashMap<String, LayerSource>,
     }
 
-    let manifests: Vec<DockerManifest> =
-        serde_json::from_value(root).context("parsing manifest.json")?;
+    let manifests: Vec<DockerManifest> = serde_json::from_value(root)
+        .map_err(|e| Error::image_layout(path, "not a valid Docker save manifest", e))?;
     let dm = manifests
         .into_iter()
         .next()
-        .context("manifest.json is empty")?;
+        .ok_or_else(|| Error::image_layout_msg(path, "the Docker save manifest lists no images"))?;
 
     let layers = dm
         .layers
@@ -223,37 +221,51 @@ fn docker_save_manifest(root: serde_json::Value) -> Result<OciManifest> {
 /// a single-image manifest is selected. Entries that are themselves indexes are
 /// skipped. Only one level of indirection is followed; deeper nesting is not
 /// supported.
-fn load_manifest_blob(image_dir: &Path, desc: &OciDescriptor) -> Result<OciManifest> {
-    let hex = strip_digest_prefix(&desc.digest)?;
-    let path = image_dir.join("blobs").join("sha256").join(hex);
-    let data = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading manifest blob {}", path.display()))?;
+fn load_manifest_blob(
+    image_dir: &Path,
+    desc: &OciDescriptor,
+    named_in: &Path,
+) -> Result<OciManifest> {
+    let path = blob_path(image_dir, &desc.digest, named_in)?;
 
     if is_index_media_type(&desc.media_type) {
-        let nested: OciIndex = serde_json::from_str(&data)
-            .with_context(|| format!("parsing nested index blob {}", path.display()))?;
-
+        let nested: OciIndex = read_json(&path, "image index")?;
         let inner = nested
             .manifests
             .into_iter()
             .find(|d| is_manifest_media_type(&d.media_type))
-            .with_context(|| {
-                format!(
-                    "nested index at {} contains no single-image manifest entry",
-                    path.display()
+            .ok_or_else(|| {
+                Error::image_layout_msg(
+                    &path,
+                    "the nested image index lists no single-image manifest",
                 )
             })?;
-
-        let inner_hex = strip_digest_prefix(&inner.digest)?;
-        let inner_path = image_dir.join("blobs").join("sha256").join(inner_hex);
-        let inner_data = std::fs::read_to_string(&inner_path)
-            .with_context(|| format!("reading inner manifest blob {}", inner_path.display()))?;
-        return serde_json::from_str(&inner_data)
-            .with_context(|| format!("parsing inner manifest blob {}", inner_path.display()));
+        let inner_path = blob_path(image_dir, &inner.digest, &path)?;
+        return read_json(&inner_path, "image manifest");
     }
 
     // Direct single-image manifest.
-    serde_json::from_str(&data).with_context(|| format!("parsing manifest blob {}", path.display()))
+    read_json(&path, "image manifest")
+}
+
+/// The path of the blob with SHA-256 `digest`, as named in the file
+/// `named_in` (which an unsupported digest algorithm is blamed on).
+fn blob_path(image_dir: &Path, digest: &str, named_in: &Path) -> Result<PathBuf> {
+    let hex = strip_digest_prefix(digest).ok_or_else(|| {
+        Error::image_layout_msg(
+            named_in,
+            format!("unsupported digest algorithm in {digest}"),
+        )
+    })?;
+    Ok(image_dir.join("blobs").join("sha256").join(hex))
+}
+
+/// Read the JSON document at `path` as a `T`, called `what` in errors.
+fn read_json<T: DeserializeOwned>(path: &Path, what: &str) -> Result<T> {
+    let data = std::fs::read_to_string(path)
+        .map_err(|e| Error::image_layout(path, format!("cannot read the {what}"), e))?;
+    serde_json::from_str(&data)
+        .map_err(|e| Error::image_layout(path, format!("not a valid {what}"), e))
 }
 
 /// Resolve the layer descriptors in `manifest` to [`LayerBlob`] values with
@@ -276,8 +288,7 @@ pub fn resolve_layers(image_dir: &Path, manifest: &OciManifest) -> Result<Vec<La
         .map(|(i, desc)| {
             let path = if desc.digest.contains(':') {
                 // OCI layout: digest is "sha256:<hex>"
-                let hex = strip_digest_prefix(&desc.digest)?;
-                image_dir.join("blobs").join("sha256").join(hex)
+                blob_path(image_dir, &desc.digest, image_dir)?
             } else {
                 // Docker save: digest field holds a relative path directly
                 image_dir.join(&desc.digest)
@@ -292,13 +303,11 @@ pub fn resolve_layers(image_dir: &Path, manifest: &OciManifest) -> Result<Vec<La
             };
 
             if !path.exists() {
-                bail!("layer blob not found: {}", path.display());
+                return Err(Error::image_layout_msg(&path, "layer blob not found"));
             }
 
             let media_type = if desc.media_type.is_empty() {
-                detect_media_type(&path)
-                    .with_context(|| format!("detecting media type for {}", path.display()))?
-                    .to_string()
+                detect_media_type(&path)?.to_string()
             } else {
                 desc.media_type.clone()
             };
@@ -313,10 +322,8 @@ pub fn resolve_layers(image_dir: &Path, manifest: &OciManifest) -> Result<Vec<La
 }
 
 /// Strip the `sha256:` prefix from a digest string, returning just the hex
-/// portion. Returns an error for any other algorithm prefix, since only
-/// SHA-256 blobs are supported.
-pub fn strip_digest_prefix(digest: &str) -> Result<&str> {
-    digest
-        .strip_prefix("sha256:")
-        .with_context(|| format!("unsupported digest algorithm in: {digest}"))
+/// portion, or `None` for any other algorithm, since only SHA-256 blobs are
+/// supported.
+pub fn strip_digest_prefix(digest: &str) -> Option<&str> {
+    digest.strip_prefix("sha256:")
 }

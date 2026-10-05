@@ -6,10 +6,13 @@
 //! sink there is no concurrent consumer — the merge engine writes directly to
 //! the output file handle.
 
-use anyhow::{Context, Result};
 use std::{path::Path, sync::mpsc};
 
-use crate::{PackerProgress, image::LayerBlob, overlay::merge_layers_into_streaming};
+use crate::{
+    LayerItem, PackerProgress,
+    error::{Error, Result},
+    overlay::merge_layers_into_streaming,
+};
 
 /// Stream the merged OCI layers into a plain tar file at `output`, emitting
 /// progress events on `progress_tx` as each layer is processed.
@@ -17,15 +20,15 @@ use crate::{PackerProgress, image::LayerBlob, overlay::merge_layers_into_streami
 /// On error the partially written output file is removed before returning, so
 /// callers never observe a truncated tar.
 pub fn write_tar_with_progress(
-    receiver: mpsc::Receiver<Result<LayerBlob>>,
+    receiver: mpsc::Receiver<LayerItem>,
     total_layers: usize,
     output: &Path,
     progress_tx: Option<std::sync::mpsc::SyncSender<PackerProgress>>,
 ) -> Result<()> {
-    let file = std::fs::File::create(output)
-        .with_context(|| format!("creating tar output {}", output.display()))?;
+    let file = std::fs::File::create(output).map_err(|e| Error::output(output, e))?;
 
-    let result = merge_layers_into_streaming(receiver, total_layers, file, progress_tx.as_ref());
+    let result = merge_layers_into_streaming(receiver, total_layers, file, progress_tx.as_ref())
+        .map_err(|e| e.into_error(output));
 
     if result.is_err() {
         let _ = std::fs::remove_file(output);

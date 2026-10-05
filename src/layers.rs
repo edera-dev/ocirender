@@ -5,10 +5,9 @@
 //! a [`DynArchive`] ready for entry iteration. No data is read from the blob
 //! until the caller begins iterating entries.
 
-use anyhow::{Result, bail};
 use std::{
     fs::File,
-    io::{BufReader, Read},
+    io::{self, BufReader, Read},
     path::Path,
 };
 use tar::Archive;
@@ -33,8 +32,8 @@ pub type DynArchive = Archive<Box<dyn Read + Send + 'static>>;
 /// directory output sink.
 ///
 /// Returns an error if the blob cannot be opened or if `media_type` is not
-/// a recognised format.
-pub fn open_layer(path: &Path, media_type: &str) -> Result<DynArchive> {
+/// a recognised format (an `Unsupported` error naming the media type).
+pub fn open_layer(path: &Path, media_type: &str) -> io::Result<DynArchive> {
     let file = File::open(path)?;
     // BufReader amortises the many small reads the tar parser makes against
     // the underlying file descriptor.
@@ -47,7 +46,12 @@ pub fn open_layer(path: &Path, media_type: &str) -> Result<DynArchive> {
         t if t.ends_with("+bzip2") => Box::new(bzip2::read::BzDecoder::new(buf)),
         t if t.ends_with("+xz") || t.ends_with("+lzma") => Box::new(xz2::read::XzDecoder::new(buf)),
         "application/vnd.oci.image.layer.v1.tar" => Box::new(buf),
-        other => bail!("unsupported layer media type: {other}"),
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("unsupported layer media type: {other}"),
+            ));
+        }
     };
     let mut archive = Archive::new(reader);
     archive.set_preserve_permissions(true);

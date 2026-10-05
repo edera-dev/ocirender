@@ -790,7 +790,7 @@ impl RegistryClient {
         let result = packer.finish().await;
         drop(tmp); // keep temp files alive until merge thread is done
         multi.clear().ok();
-        result
+        Ok(result?)
     }
 }
 

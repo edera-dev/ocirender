@@ -23,7 +23,7 @@
 //! except the owner names (`uname`/`gname`), which are dropped so that
 //! ownership is always taken from the numeric `uid`/`gid`.
 
-use anyhow::{Result, anyhow};
+use std::io;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use tar::{Builder, EntryType, Header};
@@ -80,18 +80,17 @@ impl CanonicalTarHeader {
     /// A link target held in a GNU long-link (`K`) record is captured as a
     /// PAX `linkpath` extension, since it is in neither the header nor the
     /// entry's own PAX extensions.
-    pub fn from_entry<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<Self> {
+    pub fn from_entry<R: Read>(entry: &mut tar::Entry<'_, R>) -> io::Result<Self> {
         let header = entry.header().clone();
-        let mut pax_extensions = match entry.pax_extensions() {
-            Err(e) => return Err(anyhow!("failed to read PAX extensions: {e}")),
-            Ok(None) => vec![],
-            Ok(Some(exts)) => {
+        let mut pax_extensions = match entry.pax_extensions()? {
+            None => vec![],
+            Some(exts) => {
                 let mut pairs = Vec::new();
                 for ext in exts {
-                    let ext = ext.map_err(|e| anyhow!("invalid PAX extension: {e}"))?;
+                    let ext = ext?;
                     let key = ext
                         .key()
-                        .map_err(|e| anyhow!("invalid PAX key: {e}"))?
+                        .map_err(|e| invalid_data(format!("PAX key is not valid UTF-8: {e}")))?
                         .to_string();
                     // Store values as raw bytes — do not require UTF-8 here.
                     // Binary xattr values (security.capability etc.) are valid
@@ -152,15 +151,14 @@ impl CanonicalTarHeader {
     /// are silently truncated in the raw header. The PAX `path` extension
     /// carries the full value and must be checked first.
     #[cfg(test)]
-    pub fn path(&self) -> Result<std::borrow::Cow<'_, Path>> {
+    pub fn path(&self) -> io::Result<std::borrow::Cow<'_, Path>> {
         if let Some((_, v)) = self.pax_extensions.iter().find(|(k, _)| k == "path") {
-            let s = std::str::from_utf8(v)
-                .map_err(|e| anyhow!("PAX 'path' extension is not valid UTF-8: {e}"))?;
+            let s = std::str::from_utf8(v).map_err(|e| {
+                invalid_data(format!("PAX 'path' extension is not valid UTF-8: {e}"))
+            })?;
             return Ok(std::borrow::Cow::Owned(PathBuf::from(s)));
         }
-        self.header
-            .path()
-            .map_err(|e| anyhow!("reading path from header: {e}"))
+        self.header.path()
     }
 
     /// Return the entry type (regular file, directory, symlink, hardlink, etc.).
@@ -180,19 +178,16 @@ impl CanonicalTarHeader {
     /// [`from_entry`]: CanonicalTarHeader::from_entry
     ///
     /// Returns `Ok(None)` for entry types that have no link target.
-    pub fn link_name(&self) -> Result<Option<PathBuf>> {
+    pub fn link_name(&self) -> io::Result<Option<PathBuf>> {
         // Check PAX extensions first.
         if let Some((_, v)) = self.pax_extensions.iter().find(|(k, _)| k == "linkpath") {
-            let s = std::str::from_utf8(v)
-                .map_err(|e| anyhow!("PAX 'linkpath' extension is not valid UTF-8: {e}"))?;
+            let s = std::str::from_utf8(v).map_err(|e| {
+                invalid_data(format!("PAX 'linkpath' extension is not valid UTF-8: {e}"))
+            })?;
             return Ok(Some(PathBuf::from(s)));
         }
         // Fall back to the USTAR field.
-        Ok(self
-            .header
-            .link_name()
-            .map_err(|e| anyhow!("reading link_name from header: {e}"))?
-            .map(|p| p.into_owned()))
+        Ok(self.header.link_name()?.map(|p| p.into_owned()))
     }
 
     /// Return a clone of this header suitable for emitting a regular file at a
@@ -273,7 +268,7 @@ impl CanonicalTarHeader {
         link_path: &Path,
         target_path: &Path,
         builder: &mut Builder<W>,
-    ) -> Result<()> {
+    ) -> io::Result<()> {
         let link_path_str = link_path.to_string_lossy();
         let target_str = target_path.to_string_lossy();
 
@@ -288,9 +283,7 @@ impl CanonicalTarHeader {
             pax.push(("linkpath", target_str.as_bytes().to_vec()));
         }
         if !pax.is_empty() {
-            builder
-                .append_pax_extensions(pax.iter().map(|(k, v)| (*k, v.as_slice())))
-                .map_err(|e| anyhow!("failed to append PAX extensions for hardlink: {e}"))?;
+            builder.append_pax_extensions(pax.iter().map(|(k, v)| (*k, v.as_slice())))?;
         }
 
         let mut header = self.header_for_emit();
@@ -328,9 +321,7 @@ impl CanonicalTarHeader {
         // Use builder.append (not append_data) so the tar crate does not
         // attempt to re-encode the path via GNU LongName, which would be
         // emitted between the already-queued PAX extensions and the main entry.
-        builder
-            .append(&header, &[] as &[u8])
-            .map_err(|e| anyhow!("failed to append hardlink entry: {e}"))?;
+        builder.append(&header, &[] as &[u8])?;
 
         Ok(())
     }
@@ -348,21 +339,22 @@ impl CanonicalTarHeader {
         path: &Path,
         data: R,
         builder: &mut Builder<W>,
-    ) -> Result<()> {
+    ) -> io::Result<()> {
         let mut pax = self
             .pax_extensions
             .iter()
             .filter(|(k, _)| !OWNER_NAME_PAX_KEYS.contains(&k.as_str()))
             .peekable();
         if pax.peek().is_some() {
-            builder
-                .append_pax_extensions(pax.map(|(k, v)| (k.as_str(), v.as_slice())))
-                .map_err(|e| anyhow!("failed to append PAX extensions: {e}"))?;
+            builder.append_pax_extensions(pax.map(|(k, v)| (k.as_str(), v.as_slice())))?;
         }
         let mut header = self.header_for_emit();
-        builder
-            .append_data(&mut header, path, data)
-            .map_err(|e| anyhow!("failed to append entry: {e}"))?;
+        builder.append_data(&mut header, path, data)?;
         Ok(())
     }
+}
+
+/// An `InvalidData` error for malformed header contents.
+fn invalid_data(message: String) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
 }

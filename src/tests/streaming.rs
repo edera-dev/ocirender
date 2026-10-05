@@ -23,8 +23,9 @@ use helpers::{LayerBuilder, blob, file_contents_in_tar, hardlink_target_in_tar, 
 use std::sync::mpsc;
 
 use crate::{
-    ImageSpec, LayerMeta, PackerProgress, StreamingPacker, image::LayerBlob,
-    overlay::merge_layers_into_streaming,
+    BoxError, Error, ImageSpec, LayerMeta, PackerProgress, StreamingPacker,
+    image::LayerBlob,
+    overlay::{MergeError, merge_layers_into_streaming},
 };
 use tempfile::NamedTempFile;
 
@@ -32,7 +33,10 @@ use tempfile::NamedTempFile;
 
 /// Send `blobs` over a std mpsc channel in the given order and run
 /// `merge_layers_into_streaming`, returning the merged tar bytes.
-fn streaming_merge(blobs_in_order: Vec<LayerBlob>, total_layers: usize) -> anyhow::Result<Vec<u8>> {
+fn streaming_merge(
+    blobs_in_order: Vec<LayerBlob>,
+    total_layers: usize,
+) -> Result<Vec<u8>, MergeError> {
     let (tx, rx) = mpsc::channel();
     for blob in blobs_in_order {
         tx.send(Ok(blob)).unwrap();
@@ -153,7 +157,7 @@ fn streaming_all_permutations_agree() {
     for perm in &perms {
         let blobs = perm.iter().map(|&i| blob(raw[i].clone(), i)).collect();
         let merged = streaming_merge(blobs, 3)
-            .unwrap_or_else(|e| panic!("merge failed for perm {perm:?}: {e}"));
+            .unwrap_or_else(|e| panic!("merge failed for perm {perm:?}: {e:?}"));
         assert_three_layer_invariant(&merged, &format!("perm {perm:?}"));
     }
 }
@@ -213,21 +217,18 @@ fn streaming_hardlink_resolves_correctly_out_of_order() {
 
 #[test]
 fn streaming_channel_error_aborts_merge() {
-    let (tx, rx) = mpsc::channel::<anyhow::Result<LayerBlob>>();
-    tx.send(Err(anyhow::anyhow!("simulated download failure")))
-        .unwrap();
+    let (tx, rx) = mpsc::channel::<Result<LayerBlob, BoxError>>();
+    tx.send(Err("simulated download failure".into())).unwrap();
     drop(tx);
 
     let mut out = Vec::new();
     let result = merge_layers_into_streaming(rx, 1, &mut out, None);
-    assert!(
-        result.is_err(),
-        "merge must return an error on channel error"
-    );
-    assert!(
-        result.unwrap_err().to_string().contains("download error"),
-        "error message must mention download error"
-    );
+    match result {
+        Err(MergeError::Input(Error::LayerSource(source))) => {
+            assert_eq!(source.to_string(), "simulated download failure");
+        }
+        other => panic!("expected the layer source's own error; got {other:?}"),
+    }
 }
 
 #[test]
@@ -238,8 +239,7 @@ fn streaming_channel_error_after_good_layers_aborts_merge() {
 
     let (tx, rx) = mpsc::channel();
     tx.send(Ok(blob(layer0, 1))).unwrap();
-    tx.send(Err(anyhow::anyhow!("download of layer 2 failed")))
-        .unwrap();
+    tx.send(Err("download of layer 2 failed".into())).unwrap();
     drop(tx);
 
     let mut out = Vec::new();
@@ -262,19 +262,34 @@ fn streaming_premature_channel_close_returns_error() {
     let mut out = Vec::new();
     let result = merge_layers_into_streaming(rx, 3, &mut out, None);
     assert!(
-        result.is_err(),
-        "premature close must return an error, not silently truncate"
+        matches!(
+            result,
+            Err(MergeError::Input(Error::MissingLayers {
+                received: 1,
+                expected: 3
+            }))
+        ),
+        "premature close must be an error, not silently truncate; got {result:?}"
     );
 }
 
 #[test]
 fn streaming_empty_channel_close_returns_error() {
-    let (_tx, rx) = mpsc::channel::<anyhow::Result<LayerBlob>>();
+    let (_tx, rx) = mpsc::channel::<Result<LayerBlob, BoxError>>();
     drop(_tx);
 
     let mut out = Vec::new();
     let result = merge_layers_into_streaming(rx, 2, &mut out, None);
-    assert!(result.is_err(), "empty channel close must return an error");
+    assert!(
+        matches!(
+            result,
+            Err(MergeError::Input(Error::MissingLayers {
+                received: 0,
+                expected: 2
+            }))
+        ),
+        "empty channel close must be an error; got {result:?}"
+    );
 }
 
 // ─── Error handling: output file not left behind on error ────────────────────
@@ -288,9 +303,7 @@ fn convert_tar_streaming_no_partial_file_on_channel_error() {
         drop(out);
 
         let (tx, rx) = tokio::sync::mpsc::channel(4);
-        tx.send(Err(anyhow::anyhow!("injection error")))
-            .await
-            .unwrap();
+        tx.send(Err("injection error".into())).await.unwrap();
         drop(tx);
 
         let result = crate::convert_tar_streaming(rx, 1, &out_path).await;
@@ -405,7 +418,7 @@ async fn streaming_packer_tar_no_partial_file_on_error() {
         None,
     );
 
-    packer.notify_error(anyhow::anyhow!("injected error")).await;
+    packer.notify_error("injected error").await;
     let result = packer.finish().await;
 
     assert!(
@@ -523,13 +536,11 @@ async fn streaming_packer_notify_error_causes_finish_to_fail() {
 
     let packer = StreamingPacker::new(layer_metas(2), ImageSpec::Tar { path: out_path }, None);
 
-    packer
-        .notify_error(anyhow::anyhow!("injected download error"))
-        .await;
+    packer.notify_error("injected download error").await;
     let result = packer.finish().await;
     assert!(
-        result.is_err(),
-        "finish must return an error after notify_error"
+        matches!(result, Err(Error::LayerSource(_))),
+        "finish must return the notified error; got {result:?}"
     );
 }
 
@@ -548,5 +559,14 @@ async fn streaming_packer_out_of_bounds_index_returns_error() {
     let result = packer
         .notify_layer_ready(99, std::path::PathBuf::from("/dev/null"))
         .await;
-    assert!(result.is_err(), "out-of-bounds index must return an error");
+    assert!(
+        matches!(
+            result,
+            Err(Error::LayerIndexOutOfRange {
+                index: 99,
+                count: 2
+            })
+        ),
+        "out-of-bounds index must be an error; got {result:?}"
+    );
 }

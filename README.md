@@ -171,7 +171,8 @@ let packer = StreamingPacker::new(layer_metas, spec, progress_tx);
 // May be called from any task in any order.
 packer.notify_layer_ready(index, path).await?;
 
-// Signal a download failure, causing the merge to abort.
+// Signal a download failure (any error type), causing the merge to abort;
+// finish() then returns it as the source of Error::LayerSource.
 packer.notify_error(err).await;
 
 // Wait for the output to be finalised.
@@ -198,6 +199,17 @@ Compares a generated image against a reference directory:
 - `ImageSpec::Squashfs` — mounts via `squashfuse`, diffs the mount against
   `reference`, then unmounts.
 - `ImageSpec::Dir` — diffs the directory directly against `reference`.
+
+### Errors
+
+Fallible functions return `ocirender::Result<T>`, whose error is the
+non-exhaustive `ocirender::Error`. Its variants say what failed, so a caller
+can act on it: `ImageLayout` (a missing or malformed `index.json`,
+`manifest.json` or blob), `Layer` (a layer that could not be read or merged,
+with its index), `LayerSource` (an error the caller reported, as its source),
+`MissingLayers`, `Mksquashfs` (with its stderr), `Output`, and so on. As is
+conventional, each error's `Display` describes only its own level, and
+`source()` carries the underlying cause.
 - `ImageSpec::Tar` — returns `Err`. Extract to a directory first with
   `convert-dir`, then use `ImageSpec::Dir`.
 
@@ -429,7 +441,7 @@ export OCIRENDER_REGISTRY_MIRROR=http://my-mirror.internal
 | `serde` + `serde_json` | JSON parsing for index.json / manifest |
 | `sha2` | SHA-256 hashing in the verify subcommand |
 | `tempfile` | Temporary squashfuse mountpoint in verify |
-| `anyhow` | Error handling throughout |
+| `thiserror` | The `ocirender::Error` type |
 
 ### CLI (`ocirender-cli`)
 

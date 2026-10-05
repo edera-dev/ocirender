@@ -403,6 +403,19 @@ pub fn paths_in_tar(tar_bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
+/// Format `err` with its whole source chain, as error reporters do (each
+/// error's `Display` describes only its own level).
+pub fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut chain = err.to_string();
+    let mut source = err.source();
+    while let Some(e) = source {
+        chain.push_str(": ");
+        chain.push_str(&e.to_string());
+        source = e.source();
+    }
+    chain
+}
+
 /// Return the header and PAX extensions of the entry whose path is exactly
 /// `path` (no normalisation, so a stray leading `/` or prefix shows up as a
 /// miss).

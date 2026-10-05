@@ -404,9 +404,9 @@ fn load_manifest_nested_index_with_no_image_manifest_returns_error() {
         "all-index nested structure must return an error"
     );
     let err = result.unwrap_err();
-    let chain = format!("{err:#}");
+    let chain = super::helpers::error_chain(&err);
     assert!(
-        chain.contains("no single-image manifest entry"),
+        chain.contains("no single-image manifest"),
         "error chain must explain why traversal failed; got: {chain}"
     );
 }
@@ -626,7 +626,7 @@ fn load_manifest_bare_object_that_is_not_a_manifest_returns_error() {
     .unwrap();
 
     let err = load_manifest(dir.path()).expect_err("an index is not an image manifest");
-    let msg = format!("{err:#}");
+    let msg = super::helpers::error_chain(&err);
     assert!(
         msg.contains("image manifest") && msg.contains("layers"),
         "error must say what was expected and what is missing; got: {msg}"

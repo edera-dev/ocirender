@@ -931,7 +931,6 @@ dependencies = [
 name = "ocirender"
 version = "0.2.3"
 dependencies = [
- "anyhow",
  "bzip2",
  "flate2",
  "libc",
@@ -941,6 +940,7 @@ dependencies = [
  "sha2",
  "tar",
  "tempfile",
+ "thiserror",
  "tokio",
  "xz2",
  "zstd",

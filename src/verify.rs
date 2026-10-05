@@ -11,19 +11,21 @@
 //! a [`VerifyReport`] rather than failing on the first difference, so a
 //! single run surfaces all discrepancies.
 
-use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs,
-    io::Read,
+    io::{self, Read},
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Command,
 };
 use tempfile::TempDir;
 
-use crate::ImageSpec;
+use crate::{
+    ImageSpec,
+    error::{Error, Result},
+};
 
 // ─── RAII mount guard ─────────────────────────────────────────────────────────
 
@@ -44,14 +46,17 @@ impl SquashMount {
     /// Returns an error if `squashfuse` is not installed or if the mount
     /// fails.
     fn new(squashfs: &Path) -> Result<Self> {
-        let mountpoint = TempDir::new().context("creating temp mount dir")?;
+        let mountpoint =
+            TempDir::new().map_err(|e| Error::verify("cannot create a mount point", e))?;
         let status = Command::new("squashfuse")
             .arg(squashfs)
             .arg(mountpoint.path())
             .status()
-            .context("spawning squashfuse — is it installed?")?;
+            .map_err(|e| Error::verify("cannot run squashfuse", e))?;
         if !status.success() {
-            anyhow::bail!("squashfuse failed with status {status}");
+            return Err(Error::verify_msg(format!(
+                "squashfuse failed with status {status}"
+            )));
         }
         Ok(Self { mountpoint })
     }
@@ -135,10 +140,10 @@ pub fn verify(spec: ImageSpec, reference: &Path, ignore_ownership: bool) -> Resu
             verify_dirs(mount.path(), reference, ignore_ownership)
         }
         ImageSpec::Dir { path } => verify_dirs(&path, reference, ignore_ownership),
-        ImageSpec::Tar { .. } => anyhow::bail!(
+        ImageSpec::Tar { .. } => Err(Error::verify_msg(
             "tar verification is not supported directly; \
-             extract to a directory with convert-dir first, then use --dir"
-        ),
+             extract to a directory with convert-dir first, then use --dir",
+        )),
     }
 }
 
@@ -155,8 +160,10 @@ pub(crate) fn verify_dirs(
     reference: &Path,
     ignore_ownership: bool,
 ) -> Result<VerifyReport> {
-    let generated_tree = walk_tree(generated).context("walking generated directory")?;
-    let reference_tree = walk_tree(reference).context("walking reference directory")?;
+    let generated_tree =
+        walk_tree(generated).map_err(|e| Error::verify("walking the generated directory", e))?;
+    let reference_tree =
+        walk_tree(reference).map_err(|e| Error::verify("walking the reference directory", e))?;
 
     let mut report = VerifyReport {
         only_in_generated: Vec::new(),
@@ -215,33 +222,38 @@ enum EntryKind {
 }
 
 /// Recursively walk `root` and return a map of relative path → [`EntryInfo`].
-fn walk_tree(root: &Path) -> Result<HashMap<PathBuf, EntryInfo>> {
+fn walk_tree(root: &Path) -> io::Result<HashMap<PathBuf, EntryInfo>> {
     let mut map = HashMap::new();
     walk_dir(root, root, &mut map)?;
     Ok(map)
 }
 
-fn walk_dir(root: &Path, current: &Path, map: &mut HashMap<PathBuf, EntryInfo>) -> Result<()> {
-    for entry in
-        fs::read_dir(current).with_context(|| format!("reading dir {}", current.display()))?
-    {
-        let entry = entry?;
+fn walk_dir(root: &Path, current: &Path, map: &mut HashMap<PathBuf, EntryInfo>) -> io::Result<()> {
+    for entry in fs::read_dir(current).map_err(at(current))? {
+        let entry = entry.map_err(at(current))?;
         let abs = entry.path();
         let rel = abs
             .strip_prefix(root)
-            .context("strip prefix")?
+            .expect("walked paths are under the root")
             .to_path_buf();
 
         // Use symlink_metadata so that symlink entries are recorded as
         // symlinks rather than being followed to their targets.
-        let meta = fs::symlink_metadata(&abs)
-            .with_context(|| format!("metadata for {}", abs.display()))?;
+        let meta = fs::symlink_metadata(&abs).map_err(at(&abs))?;
         let ft = meta.file_type();
 
         let (kind, symlink_target, sha256) = if ft.is_symlink() {
-            (EntryKind::Symlink, Some(fs::read_link(&abs)?), None)
+            (
+                EntryKind::Symlink,
+                Some(fs::read_link(&abs).map_err(at(&abs))?),
+                None,
+            )
         } else if ft.is_file() {
-            (EntryKind::File, None, Some(hash_file(&abs)?))
+            (
+                EntryKind::File,
+                None,
+                Some(hash_file(&abs).map_err(at(&abs))?),
+            )
         } else if ft.is_dir() {
             (EntryKind::Dir, None, None)
         } else {
@@ -273,7 +285,7 @@ fn walk_dir(root: &Path, current: &Path, map: &mut HashMap<PathBuf, EntryInfo>) 
 
 /// Compute the SHA-256 hash of a file's contents, returned as a lowercase hex
 /// string.
-fn hash_file(path: &Path) -> Result<String> {
+fn hash_file(path: &Path) -> io::Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 8192];
@@ -285,6 +297,12 @@ fn hash_file(path: &Path) -> Result<String> {
         hasher.update(&buf[..n]);
     }
     Ok(hex_encode(&hasher.finalize()))
+}
+
+/// An error mapper that names `path` in the message, since `io::Error`s from
+/// the filesystem don't.
+fn at(path: &Path) -> impl FnOnce(io::Error) -> io::Error + '_ {
+    move |e| io::Error::new(e.kind(), format!("{}: {e}", path.display()))
 }
 
 /// Encode `bytes` as a lowercase hex string.

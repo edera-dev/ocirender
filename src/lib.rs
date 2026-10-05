@@ -35,6 +35,7 @@
 
 mod canonical;
 mod dir;
+mod error;
 pub mod image;
 mod layers;
 mod overlay;
@@ -47,8 +48,11 @@ pub mod verify;
 #[cfg(test)]
 mod tests;
 
-use anyhow::Result;
+pub use error::{BoxError, Error, Result};
 pub use image::LayerBlob;
+
+/// One layer delivered to the merge, or the caller's failure to deliver one.
+pub(crate) type LayerItem = Result<LayerBlob, BoxError>;
 use std::path::{Path, PathBuf};
 
 // ── ImageSpec ─────────────────────────────────────────────────────────────────
@@ -133,7 +137,7 @@ pub struct LayerMeta {
 /// merge implementation without any code duplication.
 fn layers_from_image_dir(
     image_dir: &Path,
-) -> Result<(std::sync::mpsc::Receiver<Result<LayerBlob>>, usize)> {
+) -> Result<(std::sync::mpsc::Receiver<LayerItem>, usize)> {
     let manifest = image::load_manifest(image_dir)?;
     let layers = image::resolve_layers(image_dir, &manifest)?;
     let total = layers.len();
@@ -153,8 +157,8 @@ fn layers_from_image_dir(
 fn make_layer_channel(
     cap: usize,
 ) -> (
-    tokio::sync::mpsc::Sender<Result<LayerBlob>>,
-    std::sync::mpsc::Receiver<Result<LayerBlob>>,
+    tokio::sync::mpsc::Sender<LayerItem>,
+    std::sync::mpsc::Receiver<LayerItem>,
 ) {
     let (tokio_tx, tokio_rx) = tokio::sync::mpsc::channel(cap.max(1));
     let (std_tx, std_rx) = std::sync::mpsc::channel();
@@ -168,8 +172,8 @@ fn make_layer_channel(
 /// returns `None`, the task exits, and the std sender is dropped — signalling
 /// EOF to the blocking merge thread.
 async fn relay_to_blocking(
-    mut tokio_rx: tokio::sync::mpsc::Receiver<Result<LayerBlob>>,
-    std_tx: std::sync::mpsc::Sender<Result<LayerBlob>>,
+    mut tokio_rx: tokio::sync::mpsc::Receiver<LayerItem>,
+    std_tx: std::sync::mpsc::Sender<LayerItem>,
 ) {
     while let Some(item) = tokio_rx.recv().await {
         if std_tx.send(item).is_err() {
@@ -207,7 +211,7 @@ async fn relay_from_blocking(
 /// write function. All conversion paths — batch and streaming, sync and async
 /// — converge here.
 fn write_for_spec(
-    receiver: std::sync::mpsc::Receiver<Result<LayerBlob>>,
+    receiver: std::sync::mpsc::Receiver<LayerItem>,
     total_layers: usize,
     spec: ImageSpec,
     progress_tx: Option<std::sync::mpsc::SyncSender<PackerProgress>>,
@@ -238,11 +242,20 @@ fn write_for_spec(
 /// download-and-convert workflows, use [`StreamingPacker`] instead.
 pub async fn convert(image_dir: &Path, spec: ImageSpec) -> Result<()> {
     let image_dir = image_dir.to_path_buf();
-    tokio::task::spawn_blocking(move || {
+    join(tokio::task::spawn_blocking(move || {
         let (rx, total) = layers_from_image_dir(&image_dir)?;
         write_for_spec(rx, total, spec, None)
-    })
-    .await?
+    }))
+    .await
+}
+
+/// Wait for a blocking conversion task. A panic in the task is a bug in this
+/// crate, so it is resumed in the caller rather than turned into an error.
+async fn join<T>(task: tokio::task::JoinHandle<T>) -> T {
+    match task.await {
+        Ok(value) => value,
+        Err(e) => std::panic::resume_unwind(e.into_panic()),
+    }
 }
 
 // ── Batch compatibility wrappers ──────────────────────────────────────────────
@@ -296,10 +309,10 @@ pub async fn convert_dir(image_dir: &Path, output_dir: &Path) -> Result<()> {
 /// Streaming variant of [`convert_mksquashfs`].
 ///
 /// Layers are delivered via `receiver` as downloads complete, in any order.
-/// A download error sent as `Err` aborts the merge and cleans up the partial
-/// output file.
+/// An error sent as `Err` aborts the merge with [`Error::LayerSource`] and
+/// cleans up the partial output file.
 pub async fn convert_mksquashfs_streaming(
-    receiver: tokio::sync::mpsc::Receiver<Result<LayerBlob>>,
+    receiver: tokio::sync::mpsc::Receiver<Result<LayerBlob, BoxError>>,
     total_layers: usize,
     output_squashfs: &Path,
     squashfs_binpath: Option<&Path>,
@@ -310,14 +323,17 @@ pub async fn convert_mksquashfs_streaming(
     };
     let (std_tx, std_rx) = std::sync::mpsc::channel();
     tokio::spawn(relay_to_blocking(receiver, std_tx));
-    tokio::task::spawn_blocking(move || write_for_spec(std_rx, total_layers, spec, None)).await?
+    join(tokio::task::spawn_blocking(move || {
+        write_for_spec(std_rx, total_layers, spec, None)
+    }))
+    .await
 }
 
 /// Streaming variant of [`convert_tar`].
 ///
 /// On error the partially written output file is removed.
 pub async fn convert_tar_streaming(
-    receiver: tokio::sync::mpsc::Receiver<Result<LayerBlob>>,
+    receiver: tokio::sync::mpsc::Receiver<Result<LayerBlob, BoxError>>,
     total_layers: usize,
     output_tar: &Path,
 ) -> Result<()> {
@@ -326,7 +342,10 @@ pub async fn convert_tar_streaming(
     };
     let (std_tx, std_rx) = std::sync::mpsc::channel();
     tokio::spawn(relay_to_blocking(receiver, std_tx));
-    tokio::task::spawn_blocking(move || write_for_spec(std_rx, total_layers, spec, None)).await?
+    join(tokio::task::spawn_blocking(move || {
+        write_for_spec(std_rx, total_layers, spec, None)
+    }))
+    .await
 }
 
 /// Streaming variant of [`convert_dir`].
@@ -334,7 +353,7 @@ pub async fn convert_tar_streaming(
 /// On error the partially populated output directory is left in place —
 /// callers are responsible for cleanup.
 pub async fn convert_dir_streaming(
-    receiver: tokio::sync::mpsc::Receiver<Result<LayerBlob>>,
+    receiver: tokio::sync::mpsc::Receiver<Result<LayerBlob, BoxError>>,
     total_layers: usize,
     output_dir: &Path,
 ) -> Result<()> {
@@ -343,7 +362,10 @@ pub async fn convert_dir_streaming(
     };
     let (std_tx, std_rx) = std::sync::mpsc::channel();
     tokio::spawn(relay_to_blocking(receiver, std_tx));
-    tokio::task::spawn_blocking(move || write_for_spec(std_rx, total_layers, spec, None)).await?
+    join(tokio::task::spawn_blocking(move || {
+        write_for_spec(std_rx, total_layers, spec, None)
+    }))
+    .await
 }
 
 // ── StreamingPacker ───────────────────────────────────────────────────────────
@@ -373,7 +395,7 @@ pub async fn convert_dir_streaming(
 /// ```no_run
 /// # use ocirender::{StreamingPacker, LayerMeta, ImageSpec};
 /// # use std::path::PathBuf;
-/// # async fn example() -> anyhow::Result<()> {
+/// # async fn example() -> ocirender::Result<()> {
 /// let metas: Vec<LayerMeta> = vec![]; // populated from the image manifest
 /// let packer = StreamingPacker::new(
 ///     metas,
@@ -393,7 +415,7 @@ pub async fn convert_dir_streaming(
 pub struct StreamingPacker {
     /// Tokio sender end of the layer delivery channel. Dropped in `finish()`
     /// to signal EOF to the relay task and, transitively, the merge thread.
-    layer_tx: tokio::sync::mpsc::Sender<Result<LayerBlob>>,
+    layer_tx: tokio::sync::mpsc::Sender<LayerItem>,
     /// Per-layer metadata indexed by manifest position, used to reconstruct
     /// a [`LayerBlob`] from a bare file path in `notify_layer_ready`.
     metas: Vec<LayerMeta>,
@@ -444,18 +466,17 @@ impl StreamingPacker {
     /// Notify the packer that the layer blob at `index` has finished
     /// downloading and is available at `path`.
     ///
-    /// May be called from any task in any order. Returns an error only if the
-    /// internal channel has already closed, which means the merge thread has
-    /// hit a fatal error. In that case callers should stop sending and
-    /// propagate the error from [`finish`].
+    /// May be called from any task in any order. Fails with
+    /// [`Error::LayerIndexOutOfRange`] for an index the image does not have,
+    /// or with [`Error::PackerStopped`] once the conversion has stopped (on
+    /// an error, which [`finish`] then returns); callers should stop sending
+    /// and call [`finish`].
     ///
     /// [`finish`]: StreamingPacker::finish
     pub async fn notify_layer_ready(&self, index: usize, path: PathBuf) -> Result<()> {
-        let meta = self.metas.get(index).ok_or_else(|| {
-            anyhow::anyhow!(
-                "layer index {index} out of range (have {} layers)",
-                self.metas.len()
-            )
+        let meta = self.metas.get(index).ok_or(Error::LayerIndexOutOfRange {
+            index,
+            count: self.metas.len(),
         })?;
 
         self.layer_tx
@@ -465,18 +486,19 @@ impl StreamingPacker {
                 index,
             }))
             .await
-            .map_err(|_| anyhow::anyhow!("packer channel closed unexpectedly"))
+            .map_err(|_| Error::PackerStopped)
     }
 
     /// Signal a download failure to the packer, causing the merge to abort.
     ///
-    /// After calling this, [`finish`] will return an error. Best-effort: if
-    /// the merge has already failed and the channel is closed, this is a
-    /// no-op.
+    /// After calling this, [`finish`] returns [`Error::LayerSource`] with
+    /// `err` as its source. Best-effort: if the merge has already failed and
+    /// the channel is closed, this is a no-op, and [`finish`] returns that
+    /// failure instead.
     ///
     /// [`finish`]: StreamingPacker::finish
-    pub async fn notify_error(&self, err: anyhow::Error) {
-        let _ = self.layer_tx.send(Err(err)).await;
+    pub async fn notify_error(&self, err: impl Into<BoxError>) {
+        let _ = self.layer_tx.send(Err(err.into())).await;
     }
 
     /// Wait for all output to be finalised and return the result.
@@ -492,6 +514,6 @@ impl StreamingPacker {
         // receiver, which exits the relay task and drops the std sender,
         // unblocking the merge thread's recv loop.
         drop(self.layer_tx);
-        self.task.await?
+        join(self.task).await
     }
 }

@@ -20,11 +20,11 @@ use std::{
     sync::mpsc,
 };
 
-use crate::image::LayerBlob;
+use crate::{BoxError, Error, image::LayerBlob};
 use tempfile::{NamedTempFile, TempDir};
 
 use super::helpers;
-use helpers::{LayerBuilder, blob};
+use helpers::{LayerBuilder, blob, error_chain};
 
 // ── script helpers ────────────────────────────────────────────────────────────
 
@@ -39,7 +39,7 @@ fn write_script(dir: &TempDir, name: &str, body: &str) -> PathBuf {
 }
 
 /// Build a minimal one-layer channel for passing to write_squashfs.
-fn one_layer_channel() -> (mpsc::Receiver<anyhow::Result<LayerBlob>>, usize) {
+fn one_layer_channel() -> (mpsc::Receiver<Result<LayerBlob, BoxError>>, usize) {
     let layer = LayerBuilder::new()
         .add_file("hello.txt", b"hello", 0o644)
         .finish();
@@ -68,13 +68,12 @@ fn squashfs_binary_not_found_returns_error() {
         None,
     );
 
-    assert!(result.is_err(), "missing binary must return an error");
     assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("mksquashfs not found"),
-        "error must indicate the mksquashfs binary was not found"
+        matches!(
+            &result,
+            Err(Error::MksquashfsSpawn { source, .. }) if source.kind() == std::io::ErrorKind::NotFound
+        ),
+        "error must say mksquashfs could not be found; got {result:?}"
     );
     assert!(
         !out_path.exists(),
@@ -136,12 +135,13 @@ fn squashfs_nonzero_exit_includes_stderr_in_error() {
     let result =
         crate::squashfs::write_squashfs_with_progress(rx, total, &out_path, Some(&script), None);
 
-    assert!(result.is_err());
-    let msg = result.unwrap_err().to_string();
-    assert!(
-        msg.contains("unsupported option -tar"),
-        "stderr from mksquashfs must appear in the error; got: {msg}"
-    );
+    match result {
+        Err(e @ Error::Mksquashfs { .. }) => assert!(
+            e.to_string().contains("unsupported option -tar"),
+            "stderr from mksquashfs must appear in the error; got: {e}"
+        ),
+        other => panic!("expected mksquashfs's failure; got {other:?}"),
+    }
 }
 
 /// When the merge itself fails (channel error), the merge error must be
@@ -165,22 +165,18 @@ fn squashfs_merge_error_surfaced_over_exit_status() {
 
     // Send an Err on the channel so the merge fails.
     let (tx, rx) = mpsc::channel();
-    tx.send(Err(anyhow::anyhow!("injected download failure")))
-        .unwrap();
+    tx.send(Err("injected download failure".into())).unwrap();
     drop(tx);
 
     let result =
         crate::squashfs::write_squashfs_with_progress(rx, 1, &out_path, Some(&script), None);
 
-    assert!(result.is_err(), "merge error must propagate");
-    let err = result.unwrap_err();
-    let msg = err.to_string();
+    let err = result.expect_err("the merge error must propagate");
     assert!(
-        msg.contains("merging layers into mksquashfs stdin"),
-        "merge error context must be surfaced, not mksquashfs exit status; got: {msg}"
+        matches!(err, Error::LayerSource(_)),
+        "the layer source's failure must be surfaced, not mksquashfs's; got: {err:?}"
     );
-    // The root cause must also be reachable via the anyhow chain.
-    let chain = format!("{err:#}");
+    let chain = error_chain(&err);
     assert!(
         chain.contains("injected download failure"),
         "root cause must be present in error chain; got: {chain}"

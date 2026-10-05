@@ -16,7 +16,6 @@
 //!
 //! [`CanonicalTarHeader::from_entry`]: crate::canonical::CanonicalTarHeader::from_entry
 
-use anyhow::{Context, Result, anyhow, bail};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
@@ -44,7 +43,7 @@ enum MapSource {
 impl PaxSparse {
     /// Recognise a PAX-format sparse entry from its PAX records, returning
     /// `None` for any other entry.
-    pub fn detect(pax: &[(String, Vec<u8>)]) -> Result<Option<Self>> {
+    pub fn detect(pax: &[(String, Vec<u8>)]) -> io::Result<Option<Self>> {
         let get = |key: &str| {
             pax.iter()
                 .find(|(k, _)| k == key)
@@ -52,14 +51,16 @@ impl PaxSparse {
         };
         let num = |key: &str| {
             get(key)
-                .map(|v| parse_decimal(v).with_context(|| format!("PAX record {key}")))
+                .map(|v| parse_decimal(v).map_err(|e| malformed(format!("PAX record {key}: {e}"))))
                 .transpose()
         };
 
         let map = if get("GNU.sparse.major").is_some() {
             let version = (num("GNU.sparse.major")?, num("GNU.sparse.minor")?);
             if version != (Some(1), Some(0)) {
-                bail!("unsupported PAX sparse format {version:?}");
+                return Err(malformed(format!(
+                    "unsupported PAX sparse format {version:?}"
+                )));
             }
             MapSource::InData
         } else if let Some(map) = get("GNU.sparse.map") {
@@ -67,10 +68,12 @@ impl PaxSparse {
             let numbers = map
                 .split(|&b| b == b',')
                 .map(parse_decimal)
-                .collect::<Result<Vec<_>>>()
-                .context("PAX record GNU.sparse.map")?;
+                .collect::<io::Result<Vec<_>>>()
+                .map_err(|e| malformed(format!("PAX record GNU.sparse.map: {e}")))?;
             if numbers.len() % 2 != 0 {
-                bail!("PAX record GNU.sparse.map has an odd number of values");
+                return Err(malformed(
+                    "PAX record GNU.sparse.map has an odd number of values",
+                ));
             }
             MapSource::Records(numbers.chunks(2).map(|p| (p[0], p[1])).collect())
         } else if get("GNU.sparse.offset").is_some() {
@@ -78,12 +81,16 @@ impl PaxSparse {
             let all = |key: &str| {
                 pax.iter()
                     .filter(|(k, _)| k == key)
-                    .map(|(_, v)| parse_decimal(v).with_context(|| format!("PAX record {key}")))
-                    .collect::<Result<Vec<_>>>()
+                    .map(|(_, v)| {
+                        parse_decimal(v).map_err(|e| malformed(format!("PAX record {key}: {e}")))
+                    })
+                    .collect::<io::Result<Vec<_>>>()
             };
             let (offsets, lengths) = (all("GNU.sparse.offset")?, all("GNU.sparse.numbytes")?);
             if offsets.len() != lengths.len() {
-                bail!("PAX sparse map has unpaired GNU.sparse.offset/numbytes records");
+                return Err(malformed(
+                    "PAX sparse map has unpaired GNU.sparse.offset/numbytes records",
+                ));
             }
             MapSource::Records(offsets.into_iter().zip(lengths).collect())
         } else {
@@ -92,12 +99,13 @@ impl PaxSparse {
 
         let real_size = match num("GNU.sparse.realsize")? {
             Some(size) => size,
-            None => num("GNU.sparse.size")?.context("PAX sparse entry has no real size")?,
+            None => num("GNU.sparse.size")?
+                .ok_or_else(|| malformed("PAX sparse entry has no real size"))?,
         };
         let name = get("GNU.sparse.name")
             .map(|v| std::str::from_utf8(v).map(PathBuf::from))
             .transpose()
-            .context("PAX record GNU.sparse.name is not valid UTF-8")?;
+            .map_err(|_| malformed("PAX record GNU.sparse.name is not valid UTF-8"))?;
         Ok(Some(Self {
             name,
             real_size,
@@ -124,7 +132,7 @@ impl PaxSparse {
     /// Wrap `data`, the entry's stored bytes, in a reader that yields the
     /// file's full contents. For format 1.0 this first reads the map off the
     /// front of `data`.
-    pub fn expand<R: Read>(self, mut data: R) -> Result<SparseReader<R>> {
+    pub fn expand<R: Read>(self, mut data: R) -> io::Result<SparseReader<R>> {
         let chunks = match self.map {
             MapSource::Records(chunks) => chunks,
             MapSource::InData => read_data_map(&mut data)?,
@@ -133,12 +141,12 @@ impl PaxSparse {
         for &(offset, len) in &chunks {
             let chunk_end = offset
                 .checked_add(len)
-                .ok_or_else(|| anyhow!("PAX sparse chunk overflows"))?;
+                .ok_or_else(|| malformed("PAX sparse chunk overflows"))?;
             if offset < end || chunk_end > self.real_size {
-                bail!(
+                return Err(malformed(format!(
                     "PAX sparse map is out of order or exceeds the real size {}",
                     self.real_size
-                );
+                )));
             }
             end = chunk_end;
         }
@@ -155,19 +163,19 @@ impl PaxSparse {
 /// Read a format 1.0 sparse map off the front of an entry's data: the chunk
 /// count, then each chunk's offset and length, every number in decimal and
 /// newline-terminated, the whole map zero-padded to a 512-byte boundary.
-fn read_data_map<R: Read>(data: &mut R) -> Result<Vec<(u64, u64)>> {
+fn read_data_map<R: Read>(data: &mut R) -> io::Result<Vec<(u64, u64)>> {
     let mut consumed = 0u64;
-    let mut next_number = || -> Result<u64> {
+    let mut next_number = || -> io::Result<u64> {
         let mut digits = Vec::new();
         loop {
             let mut byte = [0u8];
             data.read_exact(&mut byte)
-                .context("PAX sparse map ends early")?;
+                .map_err(|e| io::Error::new(e.kind(), format!("PAX sparse map ends early: {e}")))?;
             consumed += 1;
             match byte[0] {
-                b'\n' => return parse_decimal(&digits).context("PAX sparse map"),
+                b'\n' => return parse_decimal(&digits),
                 b if digits.len() < 20 => digits.push(b),
-                _ => bail!("PAX sparse map number is too long"),
+                _ => return Err(malformed("PAX sparse map number is too long")),
             }
         }
     };
@@ -177,15 +185,25 @@ fn read_data_map<R: Read>(data: &mut R) -> Result<Vec<(u64, u64)>> {
         chunks.push((next_number()?, next_number()?));
     }
     let padding = consumed.next_multiple_of(512) - consumed;
-    io::copy(&mut data.take(padding), &mut io::sink()).context("PAX sparse map padding")?;
+    io::copy(&mut data.take(padding), &mut io::sink())?;
     Ok(chunks)
 }
 
-fn parse_decimal(bytes: &[u8]) -> Result<u64> {
+fn parse_decimal(bytes: &[u8]) -> io::Result<u64> {
     std::str::from_utf8(bytes)
         .ok()
         .and_then(|s| s.trim().parse().ok())
-        .ok_or_else(|| anyhow!("invalid number {:?}", String::from_utf8_lossy(bytes)))
+        .ok_or_else(|| {
+            malformed(format!(
+                "invalid number {:?}",
+                String::from_utf8_lossy(bytes)
+            ))
+        })
+}
+
+/// An `InvalidData` error for malformed sparse data.
+fn malformed(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
 /// A reader over a sparse file's full contents: zeros for the holes, and the

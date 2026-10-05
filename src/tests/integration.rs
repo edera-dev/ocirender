@@ -862,9 +862,13 @@ fn test_malformed_pax_sparse_map_is_an_error() {
             .finish();
         let err = crate::overlay::merge_layers_into(vec![blob(layer, 0)], Vec::new())
             .expect_err("a malformed sparse map must fail the merge");
+        let crate::overlay::MergeError::Input(err @ crate::Error::Layer { .. }) = err else {
+            panic!("a malformed sparse map is a layer error; got {err:?}");
+        };
+        let chain = super::helpers::error_chain(&err);
         assert!(
-            format!("{err:#}").contains("sparse"),
-            "error must name the sparse map; got: {err:#}"
+            chain.contains("sparse"),
+            "error must name the sparse map; got: {chain}"
         );
     }
 }

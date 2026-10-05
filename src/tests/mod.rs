@@ -2,6 +2,7 @@
 //! `tests/` because most of them exercise its internal modules directly.
 
 mod canonical_and_layers;
+mod errors;
 mod helpers;
 mod image;
 mod integration;

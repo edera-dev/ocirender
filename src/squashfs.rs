@@ -6,7 +6,6 @@
 //!
 //! `mksquashfs` ≥ 4.6 is required for correct `-tar` stdin support.
 
-use anyhow::{Context, Result, bail};
 use std::{
     path::Path,
     process::{Child, Command, Stdio},
@@ -15,17 +14,22 @@ use std::{
     time::Duration,
 };
 
-use crate::{PackerProgress, image::LayerBlob, overlay::merge_layers_into_streaming};
+use crate::{
+    LayerItem, PackerProgress,
+    error::{Error, Result},
+    overlay::{MergeError, merge_layers_into_streaming},
+};
 
 /// Stream the merged OCI layers into a squashfs image at `output`, emitting
 /// progress events on `progress_tx` as each layer is processed by the merge
 /// engine.
 ///
 /// `mksquashfs` is spawned immediately and begins consuming data as it
-/// arrives. If the merge fails, the partial output file is removed and the
-/// merge error is returned in preference to the `mksquashfs` exit status,
-/// since the latter is typically just a consequence of the pipe closing
-/// unexpectedly.
+/// arrives. On failure the partial output file is removed. A failure of the
+/// input (a corrupt layer, or the layer source) is reported in preference to
+/// `mksquashfs` failing, which is then just a consequence of the stream
+/// ending early; otherwise `mksquashfs` failing is reported in preference to
+/// the broken pipe it causes on the merge side.
 ///
 /// Any pre-existing file at `output` is removed before spawning to prevent
 /// `mksquashfs` from appending to stale data (`-noappend` also prevents this,
@@ -36,19 +40,21 @@ use crate::{PackerProgress, image::LayerBlob, overlay::merge_layers_into_streami
 /// thread never needs to interact with the tokio runtime. Send failures are
 /// silently ignored.
 pub fn write_squashfs_with_progress(
-    receiver: mpsc::Receiver<Result<LayerBlob>>,
+    receiver: mpsc::Receiver<LayerItem>,
     total_layers: usize,
     output: &Path,
     squashfs_binpath: Option<&Path>,
     progress_tx: Option<std::sync::mpsc::SyncSender<PackerProgress>>,
 ) -> Result<()> {
     if output.exists() {
-        std::fs::remove_file(output)
-            .with_context(|| format!("removing existing {}", output.display()))?;
+        std::fs::remove_file(output).map_err(|e| Error::output(output, e))?;
     }
 
     let mut child = spawn_mksquashfs(output, squashfs_binpath)?;
-    let stdin = child.stdin.take().context("child stdin")?;
+    let stdin = child
+        .stdin
+        .take()
+        .expect("mksquashfs is spawned with piped stdin");
 
     // stdin is moved into merge_layers_into_streaming and dropped when it
     // returns, closing the write end of the pipe. mksquashfs sees EOF and
@@ -58,29 +64,24 @@ pub fn write_squashfs_with_progress(
 
     // Always wait for mksquashfs to exit — even on merge failure — so we
     // don't leave a zombie process or an open pipe handle behind.
-    let exit = child.wait_with_output().context("waiting for mksquashfs")?;
+    let exit = child
+        .wait_with_output()
+        .map_err(|e| Error::output(output, e))?;
+    let mksquashfs_failure = (!exit.status.success()).then(|| Error::Mksquashfs {
+        status: exit.status,
+        stderr: String::from_utf8_lossy(&exit.stderr).into_owned(),
+    });
 
-    if merge_result.is_err() {
+    let result = match (merge_result, mksquashfs_failure) {
+        (Err(MergeError::Input(e)), _) => Err(e),
+        (_, Some(e)) => Err(e),
+        (Err(MergeError::Output(e)), None) => Err(Error::output(output, e)),
+        (Ok(()), None) => Ok(()),
+    };
+    if result.is_err() {
         let _ = std::fs::remove_file(output);
-        let stderr = String::from_utf8_lossy(&exit.stderr);
-        if !exit.status.success() && !stderr.is_empty() {
-            return merge_result
-                .context(format!(
-                    "mksquashfs failed (status={}):\n{stderr}",
-                    exit.status
-                ))
-                .context("merging layers into mksquashfs stdin");
-        }
-        return merge_result.context("merging layers into mksquashfs stdin");
     }
-
-    if !exit.status.success() {
-        let _ = std::fs::remove_file(output);
-        let stderr = String::from_utf8_lossy(&exit.stderr);
-        bail!("mksquashfs failed (status={}):\n{stderr}", exit.status);
-    }
-
-    Ok(())
+    result
 }
 
 /// Spawn `mksquashfs` configured to read a tar archive from stdin and write
@@ -105,27 +106,27 @@ pub fn write_squashfs_with_progress(
 fn spawn_mksquashfs(output: &Path, binpath: Option<&Path>) -> Result<Child> {
     let program = binpath.unwrap_or(Path::new("mksquashfs"));
     let mut cmd = Command::new(program);
-    cmd.args([
-        "-",
-        output.to_str().context("output path is not UTF-8")?,
-        "-tar",
-        "-noappend",
-        "-no-fragments",
-        "-comp",
-        "zstd",
-        "-Xcompression-level",
-        "2",
-        "-quiet",
-        "-default-mode",
-        "0755",
-        "-default-uid",
-        "0",
-        "-default-gid",
-        "0",
-    ])
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
+    cmd.arg("-")
+        .arg(output)
+        .args([
+            "-tar",
+            "-noappend",
+            "-no-fragments",
+            "-comp",
+            "zstd",
+            "-Xcompression-level",
+            "2",
+            "-quiet",
+            "-default-mode",
+            "0755",
+            "-default-uid",
+            "0",
+            "-default-gid",
+            "0",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     // Spawning can transiently fail with ETXTBSY ("Text file busy"): if another
     // thread in this process forks (to spawn any child) while `program` is still
@@ -142,18 +143,15 @@ fn spawn_mksquashfs(output: &Path, binpath: Option<&Path>) -> Result<Child> {
                 attempt += 1;
                 thread::sleep(Duration::from_millis(5 * u64::from(attempt)));
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // The one case where "is it installed?" is the right hint.
-                return Err(e).with_context(|| {
-                    format!(
-                        "mksquashfs not found at `{}` — is squashfs-tools installed?",
-                        program.display()
-                    )
+            // Anything else (including ETXTBSY that outlived the retries)
+            // surfaces the underlying OS error, errno and all; a missing
+            // binary is the `NotFound` kind.
+            Err(source) => {
+                return Err(Error::MksquashfsSpawn {
+                    path: program.to_path_buf(),
+                    source,
                 });
             }
-            // Anything else (including ETXTBSY that outlived the retries): don't
-            // guess a cause — surface the underlying OS error, errno and all.
-            Err(e) => bail!("spawning mksquashfs at `{}` failed: {e}", program.display()),
         }
     }
 }
