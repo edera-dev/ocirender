@@ -1,7 +1,7 @@
 //! Tar file output sink for the OCI layer merge pipeline.
 //!
-//! Provides [`write_tar`] and [`write_tar_with_progress`], which write the
-//! merged tar stream directly to a file. This is the simplest output sink:
+//! Provides [`write_tar_with_progress`], which writes the merged tar stream
+//! directly to a file. This is the simplest output sink:
 //! unlike the squashfs sink there is no subprocess, and unlike the directory
 //! sink there is no concurrent consumer — the merge engine writes directly to
 //! the output file handle.
@@ -32,17 +32,4 @@ pub fn write_tar_with_progress(
     }
 
     result
-}
-
-/// Stream the merged OCI layers into a plain tar file at `output`.
-///
-/// Convenience wrapper around [`write_tar_with_progress`] with no progress
-/// channel. On error the partially written output file is removed before
-/// returning.
-pub fn write_tar(
-    receiver: mpsc::Receiver<Result<LayerBlob>>,
-    total_layers: usize,
-    output: &Path,
-) -> Result<()> {
-    write_tar_with_progress(receiver, total_layers, output, None)
 }

@@ -2,8 +2,7 @@
 //! These tests exercise `overlay::merge_layers_into` directly on in-memory
 //! blobs and inspect the resulting merged tar without invoking mksquashfs.
 
-#[path = "helpers/mod.rs"]
-mod helpers;
+use super::helpers;
 use helpers::{
     LayerBuilder, blob, entry_type_in_tar, file_contents_in_tar, file_mode_in_tar,
     hardlink_target_in_tar, merge, paths_in_tar, symlink_target_in_tar,
@@ -861,7 +860,7 @@ fn test_malformed_pax_sparse_map_is_an_error() {
         let layer = LayerBuilder::new()
             .add_pax_sparse("bad.bin", "0.1", chunks, real_size)
             .finish();
-        let err = ocirender::overlay::merge_layers_into(vec![blob(layer, 0)], Vec::new())
+        let err = crate::overlay::merge_layers_into(vec![blob(layer, 0)], Vec::new())
             .expect_err("a malformed sparse map must fail the merge");
         assert!(
             format!("{err:#}").contains("sparse"),

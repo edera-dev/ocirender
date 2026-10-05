@@ -302,8 +302,9 @@ fn emit_deferred<W: Write>(
 /// batch variant of the merge algorithm; the streaming variant is
 /// [`merge_layers_into_streaming`].
 ///
-/// Primarily used in unit tests. Production code goes through the streaming
-/// path via `write_for_spec`.
+/// Only the tests use it. Production code goes through the streaming path
+/// via `write_for_spec`.
+#[cfg(test)]
 pub fn merge_layers_into<W: Write>(mut layers: Vec<LayerBlob>, sink: W) -> Result<()> {
     layers.sort_by_key(|l| std::cmp::Reverse(l.index));
 

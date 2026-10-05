@@ -17,13 +17,12 @@
 //!      must abort the merge cleanly: no partial output file on disk, no
 //!      hang, no panic.
 
-#[path = "helpers/mod.rs"]
-mod helpers;
+use super::helpers;
 use helpers::{LayerBuilder, blob, file_contents_in_tar, hardlink_target_in_tar, paths_in_tar};
 
 use std::sync::mpsc;
 
-use ocirender::{
+use crate::{
     ImageSpec, LayerMeta, PackerProgress, StreamingPacker, image::LayerBlob,
     overlay::merge_layers_into_streaming,
 };
@@ -294,7 +293,7 @@ fn convert_tar_streaming_no_partial_file_on_channel_error() {
             .unwrap();
         drop(tx);
 
-        let result = ocirender::convert_tar_streaming(rx, 1, &out_path).await;
+        let result = crate::convert_tar_streaming(rx, 1, &out_path).await;
         assert!(
             result.is_err(),
             "convert_tar_streaming must return an error"
@@ -319,7 +318,7 @@ fn convert_tar_streaming_no_partial_file_on_premature_close() {
         tx.send(Ok(blob(layer0, 0))).await.unwrap();
         drop(tx);
 
-        let result = ocirender::convert_tar_streaming(rx, 2, &out_path).await;
+        let result = crate::convert_tar_streaming(rx, 2, &out_path).await;
         assert!(result.is_err(), "premature close must return an error");
         assert!(
             !out_path.exists(),

@@ -230,14 +230,14 @@ src/
   squashfs.rs     # Spawn mksquashfs, pipe merged tar into stdin
   tar.rs          # Write merged tar directly to a file
   dir.rs          # Unpack merged tar directly into a directory
+  sparse.rs       # Expand PAX-format sparse files
   tracker.rs      # WhiteoutTracker, EmittedPathTracker, HardLinkTracker
   verify.rs       # Diff a generated image against a reference directory
-tests/
-  helpers/
-    mod.rs        # LayerBuilder, blob(), merge(), tar inspection helpers
-  integration.rs  # Synthetic tests for the merge pipeline
-  regression.rs   # Per-bug regression tests from production verify runs
-  streaming.rs    # Streaming merge and StreamingPacker tests
+  tests/          # Unit tests (inside the crate: most use internal modules)
+    helpers.rs    # LayerBuilder, blob(), merge(), tar inspection helpers
+    integration.rs  # Synthetic tests for the merge pipeline
+    regression.rs   # Per-bug regression tests from production verify runs
+    streaming.rs    # Streaming merge and StreamingPacker tests
 
 ocirender-cli/              # CLI crate (depends on the library)
   src/

@@ -1,7 +1,7 @@
 //! Directory output sink for the OCI layer merge pipeline.
 //!
-//! Provides [`write_dir`] and [`write_dir_with_progress`], which unpack the
-//! merged tar stream directly into a destination directory using
+//! Provides [`write_dir_with_progress`], which unpacks the merged tar
+//! stream directly into a destination directory using
 //! [`tar::Archive::unpack`]. No intermediate tar file is written to disk.
 //!
 //! Internally, the merge thread and the unpack consumer run concurrently,
@@ -58,17 +58,4 @@ pub fn write_dir_with_progress(
     // cause (e.g. a corrupt layer blob) rather than a downstream consequence
     // of the pipe closing unexpectedly.
     merge_result.and(unpack_result)
-}
-
-/// Unpack the merged OCI layers directly into `output_dir`.
-///
-/// Convenience wrapper around [`write_dir_with_progress`] with no progress
-/// channel. On error, any partially populated content in `output_dir` is left
-/// in place — callers are responsible for cleanup.
-pub fn write_dir(
-    receiver: mpsc::Receiver<Result<LayerBlob>>,
-    total_layers: usize,
-    output_dir: &Path,
-) -> Result<()> {
-    write_dir_with_progress(receiver, total_layers, output_dir, None)
 }

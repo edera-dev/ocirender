@@ -6,8 +6,7 @@ use std::fs;
 use std::io::Cursor;
 use tar::{Builder, EntryType, Header};
 
-#[path = "helpers/mod.rs"]
-mod helpers;
+use super::helpers;
 use helpers::{LayerBuilder, blob, merge, paths_in_tar};
 // regression.rs also uses:
 use helpers::{
@@ -224,8 +223,8 @@ fn regress_layer_blob_stored_as_directory_with_order_index() {
     });
     fs::write(dir.path().join("index.json"), index_json.to_string()).unwrap();
 
-    let manifest = ocirender::image::load_manifest(dir.path()).unwrap();
-    let layers = ocirender::image::resolve_layers(dir.path(), &manifest)
+    let manifest = crate::image::load_manifest(dir.path()).unwrap();
+    let layers = crate::image::resolve_layers(dir.path(), &manifest)
         .expect("resolve_layers must find blobs stored as <hash>/<manifest-order> directories");
 
     assert_eq!(layers.len(), 2);
@@ -319,9 +318,9 @@ fn regress_docker_manifest_list_media_types() {
     });
     fs::write(dir.path().join("index.json"), index_json.to_string()).unwrap();
 
-    let manifest = ocirender::image::load_manifest(dir.path())
+    let manifest = crate::image::load_manifest(dir.path())
         .expect("must handle Docker distribution manifest list media types");
-    let layers = ocirender::image::resolve_layers(dir.path(), &manifest)
+    let layers = crate::image::resolve_layers(dir.path(), &manifest)
         .expect("must resolve layer from Docker-typed manifest");
     assert_eq!(layers.len(), 1, "exactly one layer must be resolved");
 }
@@ -720,7 +719,7 @@ fn regress_hardlink_target_spelling_breaks_dir_output() {
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(Ok(blob(layer, 0))).unwrap();
         drop(tx);
-        ocirender::dir::write_dir(rx, 1, out.path())
+        crate::dir::write_dir_with_progress(rx, 1, out.path(), None)
             .unwrap_or_else(|e| panic!("dir output for target {spelling:?} failed: {e:#}"));
         let target = fs::metadata(out.path().join("usr/share/foo")).unwrap();
         let link = fs::metadata(out.path().join("usr/share/bar")).unwrap();

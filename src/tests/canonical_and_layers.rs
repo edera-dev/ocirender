@@ -8,7 +8,7 @@
 //!
 //! layers.rs: the unsupported media type error path in open_layer.
 
-use ocirender::canonical::CanonicalTarHeader;
+use crate::canonical::CanonicalTarHeader;
 use tar::{Builder, EntryType};
 use tempfile::NamedTempFile;
 
@@ -321,7 +321,7 @@ fn write_to_tar_drops_owner_names() {
 #[test]
 fn open_layer_unsupported_media_type_returns_error() {
     let f = NamedTempFile::new().unwrap();
-    let result = ocirender::layers::open_layer(f.path(), "application/vnd.edera.custom+lz4");
+    let result = crate::layers::open_layer(f.path(), "application/vnd.edera.custom+lz4");
     assert!(
         result.is_err(),
         "unsupported media type must return an error"
@@ -341,6 +341,6 @@ fn open_layer_unsupported_media_type_returns_error() {
 #[test]
 fn open_layer_empty_media_type_returns_error() {
     let f = NamedTempFile::new().unwrap();
-    let result = ocirender::layers::open_layer(f.path(), "");
+    let result = crate::layers::open_layer(f.path(), "");
     assert!(result.is_err(), "empty media type must return an error");
 }

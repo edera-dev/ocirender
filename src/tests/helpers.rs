@@ -1,9 +1,9 @@
 //! Shared test helpers for integration and regression tests.
 #![allow(dead_code)]
 
-use ocirender::canonical::CanonicalTarHeader;
-use ocirender::image::LayerBlob;
-use ocirender::overlay::normalize_path;
+use crate::canonical::CanonicalTarHeader;
+use crate::image::LayerBlob;
+use crate::overlay::normalize_path;
 use std::io::{Cursor, Write};
 use tar::{Archive, Builder, EntryType, Header};
 
@@ -381,7 +381,7 @@ pub fn blob(bytes: Vec<u8>, index: usize) -> LayerBlob {
 
 pub fn merge(layers: Vec<LayerBlob>) -> Vec<u8> {
     let mut out = Vec::new();
-    ocirender::overlay::merge_layers_into(layers, &mut out).unwrap();
+    crate::overlay::merge_layers_into(layers, &mut out).unwrap();
     out
 }
 

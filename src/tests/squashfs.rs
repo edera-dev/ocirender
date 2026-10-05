@@ -20,11 +20,10 @@ use std::{
     sync::mpsc,
 };
 
-use ocirender::image::LayerBlob;
+use crate::image::LayerBlob;
 use tempfile::{NamedTempFile, TempDir};
 
-#[path = "helpers/mod.rs"]
-mod helpers;
+use super::helpers;
 use helpers::{LayerBuilder, blob};
 
 // ── script helpers ────────────────────────────────────────────────────────────
@@ -61,11 +60,12 @@ fn squashfs_binary_not_found_returns_error() {
     drop(out); // Release so write_squashfs can manage the file itself.
 
     let (rx, total) = one_layer_channel();
-    let result = ocirender::squashfs::write_squashfs(
+    let result = crate::squashfs::write_squashfs_with_progress(
         rx,
         total,
         &out_path,
         Some(Path::new("/nonexistent/bin/mksquashfs")),
+        None,
     );
 
     assert!(result.is_err(), "missing binary must return an error");
@@ -101,8 +101,13 @@ fn squashfs_nonzero_exit_returns_error_and_removes_output() {
     tx.send(Ok(blob(layer, 0))).unwrap();
     drop(tx);
 
-    let result =
-        ocirender::squashfs::write_squashfs(rx, 1, &out_path, Some(Path::new("/bin/false")));
+    let result = crate::squashfs::write_squashfs_with_progress(
+        rx,
+        1,
+        &out_path,
+        Some(Path::new("/bin/false")),
+        None,
+    );
 
     assert!(result.is_err(), "nonzero exit must return an error");
     assert!(
@@ -128,7 +133,8 @@ fn squashfs_nonzero_exit_includes_stderr_in_error() {
     drop(out);
 
     let (rx, total) = one_layer_channel();
-    let result = ocirender::squashfs::write_squashfs(rx, total, &out_path, Some(&script));
+    let result =
+        crate::squashfs::write_squashfs_with_progress(rx, total, &out_path, Some(&script), None);
 
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
@@ -163,7 +169,8 @@ fn squashfs_merge_error_surfaced_over_exit_status() {
         .unwrap();
     drop(tx);
 
-    let result = ocirender::squashfs::write_squashfs(rx, 1, &out_path, Some(&script));
+    let result =
+        crate::squashfs::write_squashfs_with_progress(rx, 1, &out_path, Some(&script), None);
 
     assert!(result.is_err(), "merge error must propagate");
     let err = result.unwrap_err();
@@ -208,7 +215,8 @@ fn squashfs_broken_pipe_on_early_stdin_close() {
     tx.send(Ok(blob(layer, 0))).unwrap();
     drop(tx);
 
-    let result = ocirender::squashfs::write_squashfs(rx, 1, &out_path, Some(&script));
+    let result =
+        crate::squashfs::write_squashfs_with_progress(rx, 1, &out_path, Some(&script), None);
 
     // We expect an error — either from the broken pipe on the merge side or
     // from the nonzero exit on the mksquashfs side.  Either way it must not
@@ -235,7 +243,8 @@ fn squashfs_pre_existing_output_removed_before_spawn() {
     drop(out);
 
     let (rx, total) = one_layer_channel();
-    let _ = ocirender::squashfs::write_squashfs(rx, total, &out_path, Some(&script));
+    let _ =
+        crate::squashfs::write_squashfs_with_progress(rx, total, &out_path, Some(&script), None);
 
     // Whether the overall result is Ok or Err, the stale file must not remain
     // with its original contents — write_squashfs removes it before spawning.

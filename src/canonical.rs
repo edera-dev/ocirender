@@ -24,7 +24,6 @@
 //! ownership is always taken from the numeric `uid`/`gid`.
 
 use anyhow::{Result, anyhow};
-use std::borrow::Cow;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use tar::{Builder, EntryType, Header};
@@ -152,11 +151,12 @@ impl CanonicalTarHeader {
     /// The USTAR name field is limited to 100 bytes, so paths longer than that
     /// are silently truncated in the raw header. The PAX `path` extension
     /// carries the full value and must be checked first.
-    pub fn path(&self) -> Result<Cow<'_, Path>> {
+    #[cfg(test)]
+    pub fn path(&self) -> Result<std::borrow::Cow<'_, Path>> {
         if let Some((_, v)) = self.pax_extensions.iter().find(|(k, _)| k == "path") {
             let s = std::str::from_utf8(v)
                 .map_err(|e| anyhow!("PAX 'path' extension is not valid UTF-8: {e}"))?;
-            return Ok(Cow::Owned(PathBuf::from(s)));
+            return Ok(std::borrow::Cow::Owned(PathBuf::from(s)));
         }
         self.header
             .path()

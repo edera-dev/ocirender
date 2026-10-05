@@ -33,19 +33,22 @@
 //! See [`verify::verify`] for comparing a generated image against a reference
 //! directory.
 
-pub mod canonical;
-pub mod dir;
+mod canonical;
+mod dir;
 pub mod image;
-pub mod layers;
-pub mod overlay;
+mod layers;
+mod overlay;
 mod sparse;
-pub mod squashfs;
-pub mod tar;
-pub mod tracker;
+mod squashfs;
+mod tar;
+mod tracker;
 pub mod verify;
 
+#[cfg(test)]
+mod tests;
+
 use anyhow::Result;
-use image::LayerBlob;
+pub use image::LayerBlob;
 use std::path::{Path, PathBuf};
 
 // ── ImageSpec ─────────────────────────────────────────────────────────────────

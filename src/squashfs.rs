@@ -17,19 +17,6 @@ use std::{
 
 use crate::{PackerProgress, image::LayerBlob, overlay::merge_layers_into_streaming};
 
-/// Stream the merged OCI layers into a squashfs image at `output`.
-///
-/// Convenience wrapper around [`write_squashfs_with_progress`] with no
-/// progress channel.
-pub fn write_squashfs(
-    receiver: mpsc::Receiver<Result<LayerBlob>>,
-    total_layers: usize,
-    output: &Path,
-    squashfs_binpath: Option<&Path>,
-) -> Result<()> {
-    write_squashfs_with_progress(receiver, total_layers, output, squashfs_binpath, None)
-}
-
 /// Stream the merged OCI layers into a squashfs image at `output`, emitting
 /// progress events on `progress_tx` as each layer is processed by the merge
 /// engine.

@@ -60,8 +60,7 @@ pub struct OciManifest {
 pub struct LayerBlob {
     /// Absolute path to the compressed (or uncompressed) layer tar on disk.
     pub path: PathBuf,
-    /// OCI media type string, used by [`crate::layers::open_layer`] to select
-    /// the correct decompressor.
+    /// OCI media type string, used to select the correct decompressor.
     pub media_type: String,
     /// Zero-based position of this layer in the manifest's layer list.
     /// Layer 0 is the oldest (base) layer; the highest index is the newest.
