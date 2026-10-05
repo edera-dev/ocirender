@@ -40,6 +40,18 @@ fn split_src_header() -> tar::Header {
     h
 }
 
+/// A source header owned by uid/gid 999 whose owner names (`root`) disagree
+/// with the numeric ids.
+fn misnamed_src_header() -> tar::Header {
+    let mut h = src_header();
+    h.set_uid(999);
+    h.set_gid(999);
+    h.set_username("root").unwrap();
+    h.set_groupname("root").unwrap();
+    h.set_cksum();
+    h
+}
+
 /// Build a tar containing a single hardlink entry via `write_hardlink_to_tar`
 /// and return the raw bytes.
 fn hardlink_tar(link_path: &str, target_path: &str) -> Vec<u8> {
@@ -257,6 +269,50 @@ fn write_to_tar_drops_source_prefix() {
         entry.path().unwrap().to_string_lossy(),
         "bin/file",
         "stale USTAR prefix must not be prepended to the path"
+    );
+}
+
+/// A hardlink must carry the source header's numeric ids but none of its owner
+/// names.
+#[test]
+fn write_hardlink_drops_owner_names() {
+    let canonical = CanonicalTarHeader {
+        header: misnamed_src_header(),
+        pax_extensions: vec![],
+    };
+    let tar = hardlink_tar_from(canonical, "bin/link", "bin/target");
+    let entry = first_main_entry(&tar);
+
+    assert_eq!(entry.header.uid().unwrap(), 999);
+    assert_eq!(entry.header.gid().unwrap(), 999);
+    assert_eq!(entry.header.username_bytes(), Some(&b""[..]));
+    assert_eq!(entry.header.groupname_bytes(), Some(&b""[..]));
+}
+
+/// `write_to_tar` must drop owner names from both the header and the PAX
+/// extensions, keeping the numeric ids and passing every other extension
+/// through.
+#[test]
+fn write_to_tar_drops_owner_names() {
+    let canonical = CanonicalTarHeader {
+        header: misnamed_src_header(),
+        pax_extensions: vec![
+            ("uname".into(), b"root".to_vec()),
+            ("SCHILY.xattr.user.keep".into(), b"me".to_vec()),
+            ("gname".into(), b"root".to_vec()),
+        ],
+    };
+    let tar = file_tar_from(canonical, "bin/file");
+    let entry = first_main_entry(&tar);
+
+    assert_eq!(entry.header.uid().unwrap(), 999);
+    assert_eq!(entry.header.gid().unwrap(), 999);
+    assert_eq!(entry.header.username_bytes(), Some(&b""[..]));
+    assert_eq!(entry.header.groupname_bytes(), Some(&b""[..]));
+    assert_eq!(
+        entry.pax_extensions,
+        [("SCHILY.xattr.user.keep".to_string(), b"me".to_vec())],
+        "only the owner-name PAX records must be dropped"
     );
 }
 

@@ -10,7 +10,7 @@ use tar::{Builder, EntryType, Header};
 mod helpers;
 use helpers::{LayerBuilder, blob, merge, paths_in_tar};
 // regression.rs also uses:
-use helpers::{file_contents_in_tar, hardlink_target_in_tar};
+use helpers::{canonical_entry_in_tar, file_contents_in_tar, hardlink_target_in_tar};
 
 // ─── Regression tests ────────────────────────────────────────────────────────
 
@@ -445,5 +445,85 @@ fn regress_stale_ustar_prefix_on_hardlink_promotion() {
     assert_eq!(
         hardlink_target_in_tar(&merged, "bin/b").as_deref(),
         Some("bin/a")
+    );
+}
+
+/// Bug: owner names were passed through from layer headers, and mksquashfs resolves
+/// `uname`/`gname` (USTAR fields or PAX records) against the build host's passwd/group databases
+/// in preference to the numeric ids. A file with `uid=999 uname=root` came out root-owned, and
+/// the result for any other name depended on the build host. OCI makes the numeric ids
+/// authoritative, and mksquashfs 4.6.x has no `-numeric-owner`, so the names are now dropped
+/// from every emitted entry.
+///
+/// Discovered via: nix2container images whose files are owned by uid 999 but named `root`.
+#[test]
+fn regress_owner_names_dropped() {
+    let mut builder = Builder::new(Vec::new());
+
+    // Names in the USTAR header fields.
+    let mut hdr = Header::new_ustar();
+    hdr.set_path("etc/ustar-names").unwrap();
+    hdr.set_size(1);
+    hdr.set_mode(0o644);
+    hdr.set_mtime(0);
+    hdr.set_uid(999);
+    hdr.set_gid(999);
+    hdr.set_username("root").unwrap();
+    hdr.set_groupname("root").unwrap();
+    hdr.set_cksum();
+    builder.append(&hdr, Cursor::new(b"x")).unwrap();
+
+    // Names in PAX records, alongside an xattr that must survive.
+    builder
+        .append_pax_extensions([
+            ("uname", b"root" as &[u8]),
+            ("gname", b"root"),
+            ("SCHILY.xattr.user.keep", b"me"),
+        ])
+        .unwrap();
+    let mut hdr = Header::new_ustar();
+    hdr.set_path("etc/pax-names").unwrap();
+    hdr.set_size(1);
+    hdr.set_mode(0o644);
+    hdr.set_mtime(0);
+    hdr.set_uid(999);
+    hdr.set_gid(999);
+    hdr.set_cksum();
+    builder.append(&hdr, Cursor::new(b"x")).unwrap();
+
+    builder.finish().unwrap();
+    let merged = merge(vec![blob(builder.into_inner().unwrap(), 0)]);
+
+    for path in ["etc/ustar-names", "etc/pax-names"] {
+        let entry = canonical_entry_in_tar(&merged, path)
+            .unwrap_or_else(|| panic!("{path} missing from merged tar"));
+        assert_eq!(entry.header.uid().unwrap(), 999, "{path}: uid must survive");
+        assert_eq!(entry.header.gid().unwrap(), 999, "{path}: gid must survive");
+        assert_eq!(
+            entry.header.username_bytes(),
+            Some(&b""[..]),
+            "{path}: USTAR uname must be cleared"
+        );
+        assert_eq!(
+            entry.header.groupname_bytes(),
+            Some(&b""[..]),
+            "{path}: USTAR gname must be cleared"
+        );
+        let keys: Vec<&str> = entry
+            .pax_extensions
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert!(
+            !keys.contains(&"uname") && !keys.contains(&"gname"),
+            "{path}: PAX owner names must be dropped; got {keys:?}"
+        );
+    }
+    let entry = canonical_entry_in_tar(&merged, "etc/pax-names").unwrap();
+    assert!(
+        entry
+            .pax_extensions
+            .contains(&("SCHILY.xattr.user.keep".to_string(), b"me".to_vec())),
+        "other PAX records must still be emitted"
     );
 }

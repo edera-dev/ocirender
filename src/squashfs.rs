@@ -108,6 +108,13 @@ pub fn write_squashfs_with_progress(
 /// implicit root directory entries created by `mksquashfs` for paths with no
 /// explicit tar entry get mode `0755` and ownership `0:0`, rather than
 /// inheriting the invoking user's identity.
+///
+/// There is deliberately no `-numeric-owner`: mksquashfs 4.6.x rejects it.
+/// Ownership is numeric anyway because the merge strips owner names from every
+/// entry, leaving mksquashfs nothing to resolve against the host's
+/// passwd/group databases (see [`CanonicalTarHeader::write_to_tar`]).
+///
+/// [`CanonicalTarHeader::write_to_tar`]: crate::canonical::CanonicalTarHeader::write_to_tar
 fn spawn_mksquashfs(output: &Path, binpath: Option<&Path>) -> Result<Child> {
     let program = binpath.unwrap_or(Path::new("mksquashfs"));
     let mut cmd = Command::new(program);

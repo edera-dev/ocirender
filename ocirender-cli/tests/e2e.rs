@@ -397,11 +397,12 @@ fn e2e_root_directory_permissions() {
 }
 
 /// A layer written by Go's `archive/tar` (as nix2container does) must pack
-/// into squashfs with every file at its own path.
+/// into squashfs with every file at its own path and numeric ownership intact.
 ///
-/// Guards against a stale USTAR prefix doubling a 101-byte `/nix/store/...`
-/// path once its leading `/` is stripped, which mksquashfs then silently
-/// honours.
+/// Guards two bugs that only surface through mksquashfs: a stale USTAR prefix
+/// doubling a 101-byte `/nix/store/...` path once its leading `/` is stripped,
+/// and mksquashfs resolving `uname=root` to uid 0 for a file whose header says
+/// uid 999.
 #[test]
 fn e2e_go_archive_tar_layer_squashfs() {
     require_binaries();
@@ -429,10 +430,13 @@ fn e2e_go_archive_tar_layer_squashfs() {
         })
         .collect();
 
-    let expected = std::collections::BTreeMap::from([(image.split_path_file.as_str(), "0/0")]);
+    let expected = std::collections::BTreeMap::from([
+        (image.split_path_file.as_str(), "0/0"),
+        (image.misnamed_owner_file.as_str(), "999/999"),
+    ]);
     assert_eq!(
         files, expected,
-        "files must sit at their own paths; unsquashfs -lln:\n{stdout}"
+        "files must sit at their own paths with numeric ownership; unsquashfs -lln:\n{stdout}"
     );
 }
 

@@ -19,13 +19,26 @@
 //! `SCHILY.xattr.security.capability`, which contains a raw `vfs_cap_data`
 //! struct).  We therefore store all PAX values as raw `Vec<u8>` and decode
 //! to UTF-8 only for the two keys we semantically interpret (`path` and
-//! `linkpath`).  All other values are re-emitted verbatim so no data is lost.
+//! `linkpath`).  All other values are re-emitted verbatim so no data is lost,
+//! except the owner names (`uname`/`gname`), which are dropped so that
+//! ownership is always taken from the numeric `uid`/`gid`.
 
 use anyhow::{Result, anyhow};
 use std::borrow::Cow;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use tar::{Builder, EntryType, Header};
+
+/// PAX keys carrying owner *names*, which are never emitted.
+///
+/// OCI treats `uid`/`gid` as authoritative and the names as secondary, but
+/// mksquashfs resolves a name against the build host's passwd/group databases
+/// in preference to the numeric id, so `uid=999 uname=root` would come out
+/// root-owned (as would GNU tar or bsdtar extracting the tar output as root).
+/// mksquashfs 4.6.x has no `-numeric-owner` to turn this off, so the names,
+/// these PAX records and the matching USTAR fields alike, are dropped from
+/// every emitted entry instead.
+const OWNER_NAME_PAX_KEYS: [&str; 2] = ["uname", "gname"];
 
 /// A tar header paired with its PAX extended header key-value pairs.
 ///
@@ -176,10 +189,16 @@ impl CanonicalTarHeader {
     ///   that Go's `archive/tar` split across prefix and name), or is a
     ///   different path entirely (hardlink promotion reuses the target's
     ///   header). GNU headers have no prefix field.
+    /// - `uname`/`gname`: see [`OWNER_NAME_PAX_KEYS`].
     fn header_for_emit(&self) -> Header {
         let mut header = self.header.clone();
         if let Some(ustar) = header.as_ustar_mut() {
             ustar.prefix.fill(0);
+            ustar.uname.fill(0);
+            ustar.gname.fill(0);
+        } else if let Some(gnu) = header.as_gnu_mut() {
+            gnu.uname.fill(0);
+            gnu.gname.fill(0);
         }
         header
     }
@@ -273,20 +292,23 @@ impl CanonicalTarHeader {
     ///
     /// All stored PAX extensions — including binary-valued ones such as
     /// `SCHILY.xattr.security.capability` — are emitted verbatim before the
-    /// main entry via [`tar::Builder::append_pax_extensions`].
+    /// main entry via [`tar::Builder::append_pax_extensions`], except the
+    /// owner names: `uname`/`gname` are dropped from both the PAX extensions
+    /// and the header so that consumers take ownership from `uid`/`gid`.
     pub fn write_to_tar<W: Write, R: Read>(
         &self,
         path: &Path,
         data: R,
         builder: &mut Builder<W>,
     ) -> Result<()> {
-        if !self.pax_extensions.is_empty() {
+        let mut pax = self
+            .pax_extensions
+            .iter()
+            .filter(|(k, _)| !OWNER_NAME_PAX_KEYS.contains(&k.as_str()))
+            .peekable();
+        if pax.peek().is_some() {
             builder
-                .append_pax_extensions(
-                    self.pax_extensions
-                        .iter()
-                        .map(|(k, v)| (k.as_str(), v.as_slice())),
-                )
+                .append_pax_extensions(pax.map(|(k, v)| (k.as_str(), v.as_slice())))
                 .map_err(|e| anyhow!("failed to append PAX extensions: {e}"))?;
         }
         let mut header = self.header_for_emit();

@@ -243,6 +243,20 @@ pub fn paths_in_tar(tar_bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
+/// Return the header and PAX extensions of the entry whose path is exactly
+/// `path` (no normalisation, so a stray leading `/` or prefix shows up as a
+/// miss).
+pub fn canonical_entry_in_tar(tar_bytes: &[u8], path: &str) -> Option<CanonicalTarHeader> {
+    let mut archive = Archive::new(Cursor::new(tar_bytes));
+    for mut entry in archive.entries().unwrap().flatten() {
+        let canonical = CanonicalTarHeader::from_entry(&mut entry).ok()?;
+        if canonical.path().unwrap().to_string_lossy() == path {
+            return Some(canonical);
+        }
+    }
+    None
+}
+
 /// Read the symlink target for `link_path`, preferring PAX `linkpath`.
 pub fn symlink_target_in_tar(tar_bytes: &[u8], link_path: &str) -> Option<String> {
     let mut archive = Archive::new(Cursor::new(tar_bytes));

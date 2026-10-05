@@ -115,17 +115,22 @@ pub struct GoUstarImage {
     /// Normalised path of a file whose absolute source path is 101 bytes,
     /// split across the USTAR prefix and name fields.
     pub split_path_file: String,
+    /// Normalised path of a file owned by uid/gid 999 whose header names the
+    /// owner `root`.
+    pub misnamed_owner_file: String,
 }
 
 /// Generate, under `base_dir`, an OCI layout with one uncompressed layer
 /// mirroring what Go's `archive/tar` writes for a nix2container image:
-/// absolute `/nix/store/...` paths and a 101-byte path split across the USTAR
-/// prefix and name fields.
+/// absolute `/nix/store/...` paths, a 101-byte path split across the USTAR
+/// prefix and name fields, and a file owned by uid/gid 999 whose header gives
+/// the owner names as `root`.
 pub fn generate_go_ustar_image(base_dir: &Path) -> Result<GoUstarImage> {
     let store = format!("/nix/store/{}-pkg-1.0", "a".repeat(32));
     let share = format!("{store}/share");
     // 101 bytes in total with the '/' joining prefix and name.
     let split_name = "f".repeat(101 - share.len() - 1);
+    let owned = format!("{store}/owned");
 
     let mut b = Builder::new(Vec::new());
     for dir in ["/nix", "/nix/store", store.as_str(), share.as_str()] {
@@ -134,6 +139,8 @@ pub fn generate_go_ustar_image(base_dir: &Path) -> Result<GoUstarImage> {
     }
     let h = go_ustar_header(&share, &split_name, EntryType::Regular, 6, 0, "root");
     b.append(&h, Cursor::new(b"split\n" as &[u8]))?;
+    let h = go_ustar_header("", &owned, EntryType::Regular, 6, 999, "root");
+    b.append(&h, Cursor::new(b"owned\n" as &[u8]))?;
     b.finish()?;
     let layer = b.into_inner()?;
 
@@ -147,6 +154,7 @@ pub fn generate_go_ustar_image(base_dir: &Path) -> Result<GoUstarImage> {
     Ok(GoUstarImage {
         oci_layout: write_oci_layout(&base_dir.join("go-ustar"), &[blob])?,
         split_path_file: format!("{}/{split_name}", &share[1..]),
+        misnamed_owner_file: owned[1..].to_string(),
     })
 }
 
