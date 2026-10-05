@@ -73,6 +73,10 @@ impl CanonicalTarHeader {
     ///
     /// Values are stored as raw bytes to accommodate non-UTF-8 payloads such
     /// as `SCHILY.xattr.security.capability`.
+    ///
+    /// An old-GNU sparse entry (typeflag `S`) is captured as a plain regular
+    /// file of its real size, because that is what the entry reads back as:
+    /// the `tar` crate fills in the holes as the data is read.
     pub fn from_entry<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<Self> {
         let header = entry.header().clone();
         let pax_extensions = match entry.pax_extensions() {
@@ -95,10 +99,35 @@ impl CanonicalTarHeader {
                 pairs
             }
         };
-        Ok(Self {
+        let mut canonical = Self {
             header,
             pax_extensions,
-        })
+        };
+        // Re-emitting the sparse header, whose size field counts only the
+        // stored chunks, ahead of the expanded data would desynchronise the
+        // output stream at the first hole.
+        if canonical.entry_type() == EntryType::GNUSparse {
+            canonical.make_regular(entry.size());
+        }
+        Ok(canonical)
+    }
+
+    /// Rewrite this header to describe a plain regular file of `size` bytes,
+    /// dropping every sparse-file encoding it may carry: the old-GNU sparse
+    /// map in the header block and the `GNU.sparse.*` PAX records.
+    fn make_regular(&mut self, size: u64) {
+        self.header.set_entry_type(EntryType::Regular);
+        self.header.set_size(size);
+        if let Some(gnu) = self.header.as_gnu_mut() {
+            for block in &mut gnu.sparse {
+                block.offset.fill(0);
+                block.numbytes.fill(0);
+            }
+            gnu.isextended.fill(0);
+            gnu.realsize.fill(0);
+        }
+        self.pax_extensions
+            .retain(|(k, _)| !k.starts_with("GNU.sparse."));
     }
 
     /// Return the entry path, preferring the PAX `path` extension over the

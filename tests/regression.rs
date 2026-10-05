@@ -10,7 +10,10 @@ use tar::{Builder, EntryType, Header};
 mod helpers;
 use helpers::{LayerBuilder, blob, merge, paths_in_tar};
 // regression.rs also uses:
-use helpers::{canonical_entry_in_tar, file_contents_in_tar, hardlink_target_in_tar};
+use helpers::{
+    canonical_entry_in_tar, entry_type_in_tar, expand_sparse, file_contents_in_tar,
+    hardlink_target_in_tar,
+};
 
 // ─── Regression tests ────────────────────────────────────────────────────────
 
@@ -525,5 +528,63 @@ fn regress_owner_names_dropped() {
             .pax_extensions
             .contains(&("SCHILY.xattr.user.keep".to_string(), b"me".to_vec())),
         "other PAX records must still be emitted"
+    );
+}
+
+/// Bug: an old-GNU sparse entry (typeflag `S`, as `tar --format=gnu --sparse` writes) was
+/// re-emitted with its header unchanged. That header's size counts only the stored chunks, but the
+/// `tar` crate reads the entry back with its holes filled in, so the output carried more data than
+/// its header announced and every reader lost sync at the first hole: the tar output silently
+/// garbled or lost what followed, the dir output failed, and mksquashfs aborted with "the tarfile
+/// appears to be truncated or corrupted".
+///
+/// Discovered via: code inspection, then confirmed with a GNU tar sparse layer.
+#[test]
+fn regress_gnu_sparse_entry_desynchronised_stream() {
+    let chunks: [(u64, &[u8]); 2] = [(0, &[b'a'; 512]), (64 * 1024, b"tail\n")];
+    let real_size = 64 * 1024 + 5;
+    let layer = LayerBuilder::new()
+        .add_gnu_sparse("var/log/lastlog", &chunks, real_size)
+        .add_file("etc/after", b"after\n", 0o644)
+        .finish();
+    let merged = merge(vec![blob(layer, 0)]);
+
+    assert_eq!(paths_in_tar(&merged), ["var/log/lastlog", "etc/after"]);
+    assert_eq!(
+        entry_type_in_tar(&merged, "var/log/lastlog"),
+        Some(EntryType::Regular),
+        "a sparse file must be emitted as the regular file it reads back as"
+    );
+    assert_eq!(
+        file_contents_in_tar(&merged, "var/log/lastlog"),
+        Some(expand_sparse(&chunks, real_size))
+    );
+    assert_eq!(
+        file_contents_in_tar(&merged, "etc/after").as_deref(),
+        Some(&b"after\n"[..]),
+        "the entry after a sparse file must survive intact"
+    );
+}
+
+/// Variant of the above for hardlink promotion: a whited-out sparse file was not buffered (only
+/// regular files were), so a surviving hardlink to it had nothing to be promoted from and was
+/// silently dropped.
+#[test]
+fn regress_gnu_sparse_entry_promoted() {
+    let chunks: [(u64, &[u8]); 2] = [(0, &[b'b'; 1024]), (16 * 1024, b"end")];
+    let real_size = 16 * 1024 + 3;
+    let layer0 = LayerBuilder::new()
+        .add_gnu_sparse("usr/lib/data.bin", &chunks, real_size)
+        .add_hardlink("usr/lib/alias.bin", "usr/lib/data.bin")
+        .finish();
+    let layer1 = LayerBuilder::new()
+        .add_whiteout("usr/lib", "data.bin")
+        .finish();
+    let merged = merge(vec![blob(layer0, 0), blob(layer1, 1)]);
+
+    assert_eq!(paths_in_tar(&merged), ["usr/lib/alias.bin"]);
+    assert_eq!(
+        file_contents_in_tar(&merged, "usr/lib/alias.bin"),
+        Some(expand_sparse(&chunks, real_size))
     );
 }

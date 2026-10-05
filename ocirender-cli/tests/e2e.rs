@@ -23,7 +23,7 @@
 
 mod fixtures;
 
-use fixtures::{generate_fixtures, generate_go_ustar_image};
+use fixtures::{generate_fixtures, generate_gnu_sparse_image, generate_go_ustar_image};
 
 use std::{
     path::{Path, PathBuf},
@@ -438,6 +438,31 @@ fn e2e_go_archive_tar_layer_squashfs() {
         files, expected,
         "files must sit at their own paths with numeric ownership; unsquashfs -lln:\n{stdout}"
     );
+}
+
+/// An old-GNU sparse file must pack into squashfs with its holes intact, and
+/// without desynchronising the tar stream for the entries after it (which
+/// made mksquashfs reject the whole image as truncated or corrupted).
+#[test]
+fn e2e_gnu_sparse_layer_squashfs() {
+    require_binaries();
+    let work = TempDir::new().unwrap();
+    let image = generate_gnu_sparse_image(work.path()).expect("generating sparse image");
+    let squashfs = convert_squashfs(&image.oci_layout, work.path(), "gnu-sparse");
+
+    let cat = |path: &str| {
+        let out = Command::new("unsquashfs")
+            .args(["-cat", squashfs.to_str().unwrap(), path])
+            .output()
+            .expect("spawning unsquashfs -cat");
+        assert!(out.status.success(), "unsquashfs -cat {path} failed");
+        out.stdout
+    };
+    assert!(
+        cat(image.sparse_file) == image.sparse_contents,
+        "sparse file contents must match, holes included"
+    );
+    assert_eq!(cat(image.after_file), b"after\n");
 }
 
 #[test]

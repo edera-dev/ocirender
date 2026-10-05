@@ -142,8 +142,71 @@ pub fn generate_go_ustar_image(base_dir: &Path) -> Result<GoUstarImage> {
     let h = go_ustar_header("", &owned, EntryType::Regular, 6, 999, "root");
     b.append(&h, Cursor::new(b"owned\n" as &[u8]))?;
     b.finish()?;
-    let layer = b.into_inner()?;
 
+    Ok(GoUstarImage {
+        oci_layout: write_single_layer_layout(&base_dir.join("go-ustar"), b.into_inner()?)?,
+        split_path_file: format!("{}/{split_name}", &share[1..]),
+        misnamed_owner_file: owned[1..].to_string(),
+    })
+}
+
+/// A single-layer image holding an old-GNU sparse file.
+pub struct GnuSparseImage {
+    pub oci_layout: PathBuf,
+    /// Path of the sparse file.
+    pub sparse_file: &'static str,
+    /// The sparse file's full contents, holes included.
+    pub sparse_contents: Vec<u8>,
+    /// Path of a regular file stored after the sparse one.
+    pub after_file: &'static str,
+}
+
+/// Generate, under `base_dir`, an OCI layout with one uncompressed layer
+/// holding an old-GNU sparse file (typeflag `S`, as `tar --format=gnu
+/// --sparse` writes it) followed by a regular file.
+pub fn generate_gnu_sparse_image(base_dir: &Path) -> Result<GnuSparseImage> {
+    let head = [b'h'; 512];
+    let (tail_offset, tail) = (256 * 1024, b"tail\n");
+    let real_size = tail_offset + tail.len() as u64;
+
+    let mut h = Header::new_gnu();
+    h.set_path("var/log/lastlog")?;
+    h.set_entry_type(EntryType::GNUSparse);
+    h.set_mode(0o644);
+    h.set_mtime(0);
+    h.set_size((head.len() + tail.len()) as u64);
+    let gnu = h.as_gnu_mut().unwrap();
+    gnu.sparse[0].offset = octal12(0);
+    gnu.sparse[0].numbytes = octal12(head.len() as u64);
+    gnu.sparse[1].offset = octal12(tail_offset);
+    gnu.sparse[1].numbytes = octal12(tail.len() as u64);
+    gnu.realsize = octal12(real_size);
+    h.set_cksum();
+
+    let mut b = TarBuilder::new(0, 0);
+    b.inner
+        .append(&h, Cursor::new([&head[..], tail].concat()))?;
+    b.add_file("etc/after", b"after\n", 0o644);
+
+    let mut sparse_contents = vec![0u8; real_size as usize];
+    sparse_contents[..head.len()].copy_from_slice(&head);
+    sparse_contents[tail_offset as usize..].copy_from_slice(tail);
+    Ok(GnuSparseImage {
+        oci_layout: write_single_layer_layout(&base_dir.join("gnu-sparse"), b.finish())?,
+        sparse_file: "var/log/lastlog",
+        sparse_contents,
+        after_file: "etc/after",
+    })
+}
+
+/// Encode `v` as a NUL-terminated 11-digit octal tar numeric field.
+fn octal12(v: u64) -> [u8; 12] {
+    format!("{v:011o}\0").as_bytes().try_into().unwrap()
+}
+
+/// Write an OCI layout under `base` whose only layer is the uncompressed tar
+/// `layer`.
+fn write_single_layer_layout(base: &Path, layer: Vec<u8>) -> Result<PathBuf> {
     let blob = DigestedBlob {
         diff_id: sha256_hex(&layer),
         digest: sha256_hex(&layer),
@@ -151,11 +214,7 @@ pub fn generate_go_ustar_image(base_dir: &Path) -> Result<GoUstarImage> {
         data: layer,
         media_type: "application/vnd.oci.image.layer.v1.tar",
     };
-    Ok(GoUstarImage {
-        oci_layout: write_oci_layout(&base_dir.join("go-ustar"), &[blob])?,
-        split_path_file: format!("{}/{split_name}", &share[1..]),
-        misnamed_owner_file: owned[1..].to_string(),
-    })
+    write_oci_layout(base, &[blob])
 }
 
 /// A USTAR header with `prefix` and `name` written raw, as Go's `archive/tar`

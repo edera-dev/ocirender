@@ -178,6 +178,36 @@ impl LayerBuilder {
         self
     }
 
+    /// Add an old-GNU sparse file (typeflag `S`), as `tar --format=gnu
+    /// --sparse` writes it: `chunks` are the `(offset, data)` regions that
+    /// hold data, everything else up to `real_size` is a hole, and only the
+    /// chunks are stored. At most four chunks fit in the header; every chunk
+    /// but the last must be a multiple of 512 bytes long, as GNU tar's are.
+    pub fn add_gnu_sparse(mut self, path: &str, chunks: &[(u64, &[u8])], real_size: u64) -> Self {
+        assert!(
+            chunks.len() <= 4,
+            "only the header's four sparse slots are supported"
+        );
+        let mut hdr = Header::new_gnu();
+        hdr.set_path(path).unwrap();
+        hdr.set_entry_type(EntryType::GNUSparse);
+        hdr.set_mode(0o644);
+        hdr.set_mtime(0);
+        hdr.set_uid(0);
+        hdr.set_gid(0);
+        let stored: Vec<u8> = chunks.iter().flat_map(|(_, d)| d.iter().copied()).collect();
+        hdr.set_size(stored.len() as u64);
+        let gnu = hdr.as_gnu_mut().unwrap();
+        for (slot, (offset, data)) in gnu.sparse.iter_mut().zip(chunks) {
+            slot.offset = octal12(*offset);
+            slot.numbytes = octal12(data.len() as u64);
+        }
+        gnu.realsize = octal12(real_size);
+        hdr.set_cksum();
+        self.inner.append(&hdr, Cursor::new(stored)).unwrap();
+        self
+    }
+
     pub fn add_whiteout(self, dir: &str, name: &str) -> Self {
         let path = if dir.is_empty() {
             format!(".wh.{name}")
@@ -195,6 +225,22 @@ impl LayerBuilder {
         self.inner.finish().unwrap();
         self.inner.into_inner().unwrap()
     }
+}
+
+/// Encode `v` as a NUL-terminated 11-digit octal tar numeric field.
+fn octal12(v: u64) -> [u8; 12] {
+    format!("{v:011o}\0").as_bytes().try_into().unwrap()
+}
+
+/// Expand `(offset, data)` chunks into the full contents of a `real_size`
+/// sparse file, holes zero-filled.
+pub fn expand_sparse(chunks: &[(u64, &[u8])], real_size: u64) -> Vec<u8> {
+    let mut out = vec![0u8; real_size as usize];
+    for (offset, data) in chunks {
+        let offset = *offset as usize;
+        out[offset..offset + data.len()].copy_from_slice(data);
+    }
+    out
 }
 
 /// Truncate a string to at most `max_chars` characters.

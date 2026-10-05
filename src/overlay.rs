@@ -96,9 +96,13 @@ fn process_layer<W: Write>(
         if whiteout.is_suppressed(&path, blob.index) {
             // Buffer regular file content even for suppressed entries: a
             // hardlink in the same or an older layer may be alive and need
-            // these bytes for promotion to a standalone file.
+            // these bytes for promotion to a standalone file. A sparse file is
+            // captured as a regular one, so it is buffered too.
             let entry_type = entry.header().entry_type();
-            if entry_type == EntryType::Regular || entry_type == EntryType::Continuous {
+            if matches!(
+                entry_type,
+                EntryType::Regular | EntryType::Continuous | EntryType::GNUSparse
+            ) {
                 let canonical = CanonicalTarHeader::from_entry(&mut entry)
                     .context("capturing suppressed entry header")?;
                 let mut data = Vec::new();
