@@ -120,7 +120,7 @@ fn docker_save_layout(layers: &[(&[u8], &str)]) -> TempDir {
 #[test]
 fn detect_gzip() {
     let f = tempfile::NamedTempFile::new().unwrap();
-    fs::write(f.path(), &[0x1f, 0x8b, 0x00, 0x00]).unwrap();
+    fs::write(f.path(), [0x1f, 0x8b, 0x00, 0x00]).unwrap();
     assert_eq!(
         detect_media_type(f.path()).unwrap(),
         "application/vnd.oci.image.layer.v1.tar+gzip"
@@ -130,7 +130,7 @@ fn detect_gzip() {
 #[test]
 fn detect_zstd() {
     let f = tempfile::NamedTempFile::new().unwrap();
-    fs::write(f.path(), &[0x28, 0xb5, 0x2f, 0xfd]).unwrap();
+    fs::write(f.path(), [0x28, 0xb5, 0x2f, 0xfd]).unwrap();
     assert_eq!(
         detect_media_type(f.path()).unwrap(),
         "application/vnd.oci.image.layer.v1.tar+zstd"
@@ -140,7 +140,7 @@ fn detect_zstd() {
 #[test]
 fn detect_bzip2() {
     let f = tempfile::NamedTempFile::new().unwrap();
-    fs::write(f.path(), &[0x42, 0x5a, 0x68, 0x00]).unwrap();
+    fs::write(f.path(), [0x42, 0x5a, 0x68, 0x00]).unwrap();
     assert_eq!(
         detect_media_type(f.path()).unwrap(),
         "application/vnd.oci.image.layer.v1.tar+bzip2"
@@ -150,7 +150,7 @@ fn detect_bzip2() {
 #[test]
 fn detect_xz() {
     let f = tempfile::NamedTempFile::new().unwrap();
-    fs::write(f.path(), &[0xfd, 0x37, 0x7a, 0x58]).unwrap();
+    fs::write(f.path(), [0xfd, 0x37, 0x7a, 0x58]).unwrap();
     assert_eq!(
         detect_media_type(f.path()).unwrap(),
         "application/vnd.oci.image.layer.v1.tar+xz"
@@ -161,7 +161,7 @@ fn detect_xz() {
 fn detect_uncompressed_fallback() {
     let f = tempfile::NamedTempFile::new().unwrap();
     // Plain tar magic bytes — not any of the compressed formats.
-    fs::write(f.path(), &[0x75, 0x73, 0x74, 0x61]).unwrap();
+    fs::write(f.path(), [0x75, 0x73, 0x74, 0x61]).unwrap();
     assert_eq!(
         detect_media_type(f.path()).unwrap(),
         "application/vnd.oci.image.layer.v1.tar"
@@ -224,7 +224,7 @@ fn load_manifest_index_json_preferred_over_manifest_json() {
     let decoy_layer_data = [0x28u8, 0xb5, 0x2f, 0xfd];
     let decoy_digest = sha256_hex(&decoy_layer_data);
     let blobs = layout.path().join("blobs").join("sha256");
-    fs::write(blobs.join(&decoy_digest), &decoy_layer_data).unwrap();
+    fs::write(blobs.join(&decoy_digest), decoy_layer_data).unwrap();
     let decoy_manifest = serde_json::json!([{
         "Config": "irrelevant",
         "Layers": [format!("blobs/sha256/{decoy_digest}")],
@@ -300,7 +300,7 @@ fn load_manifest_nested_index_followed_to_single_image_manifest() {
     // Write the layer blob.
     let layer_data = [0x1f_u8, 0x8b, 0x00, 0x00]; // gzip magic
     let layer_digest = sha256_hex(&layer_data);
-    fs::write(blobs.join(&layer_digest), &layer_data).unwrap();
+    fs::write(blobs.join(&layer_digest), layer_data).unwrap();
 
     // Write the inner single-image manifest.
     let inner_manifest = serde_json::json!({
@@ -462,7 +462,7 @@ fn load_manifest_docker_save_without_layer_sources_falls_back_to_magic() {
 
     let data = [0x1f_u8, 0x8b, 0x00, 0x00]; // gzip magic
     let digest = sha256_hex(&data);
-    fs::write(blobs.join(&digest), &data).unwrap();
+    fs::write(blobs.join(&digest), data).unwrap();
 
     let manifest = serde_json::json!([{
         "Config": "blobs/sha256/fakecfg",
@@ -547,7 +547,7 @@ fn resolve_layers_falls_back_to_magic_when_media_type_empty() {
 
     let data = [0x1f_u8, 0x8b, 0x00, 0x00]; // gzip magic
     let digest = sha256_hex(&data);
-    fs::write(blobs.join(&digest), &data).unwrap();
+    fs::write(blobs.join(&digest), data).unwrap();
 
     let manifest = serde_json::json!([{
         "Config": "blobs/sha256/fakecfg",
@@ -657,7 +657,7 @@ mod oci_spec_compat {
         // Write a minimal layer blob.
         let layer_data = [0x1f_u8, 0x8b, 0x00, 0x00]; // gzip magic
         let layer_digest_hex = sha256_hex(&layer_data);
-        fs::write(blobs.join(&layer_digest_hex), &layer_data).unwrap();
+        fs::write(blobs.join(&layer_digest_hex), layer_data).unwrap();
 
         // Build a manifest blob using oci-spec, mirroring what the downloader does.
         let layer_desc = DescriptorBuilder::default()

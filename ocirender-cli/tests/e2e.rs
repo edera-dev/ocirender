@@ -89,13 +89,11 @@ fn require_binaries() {
 
 /// Returns the absolute path of `name` on PATH, or `None`.
 fn which(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH")
-        .map(|path_var| {
-            std::env::split_paths(&path_var)
-                .map(|dir| dir.join(name))
-                .find(|p| p.is_file())
-        })
-        .flatten()
+    std::env::var_os("PATH").and_then(|path_var| {
+        std::env::split_paths(&path_var)
+            .map(|dir| dir.join(name))
+            .find(|p| p.is_file())
+    })
 }
 
 // ── shared fixture state ──────────────────────────────────────────────────────

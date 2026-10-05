@@ -634,10 +634,10 @@ impl TarBuilder {
         if path.len() > 99 {
             pax.push(("path", path.as_bytes()));
         }
-        if let Some(l) = link {
-            if l.len() > 99 {
-                pax.push(("linkpath", l.as_bytes()));
-            }
+        if let Some(l) = link
+            && l.len() > 99
+        {
+            pax.push(("linkpath", l.as_bytes()));
         }
         pax
     }
