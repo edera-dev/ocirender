@@ -115,7 +115,7 @@ impl CanonicalTarHeader {
     /// Rewrite this header to describe a plain regular file of `size` bytes,
     /// dropping every sparse-file encoding it may carry: the old-GNU sparse
     /// map in the header block and the `GNU.sparse.*` PAX records.
-    fn make_regular(&mut self, size: u64) {
+    pub(crate) fn make_regular(&mut self, size: u64) {
         self.header.set_entry_type(EntryType::Regular);
         self.header.set_size(size);
         if let Some(gnu) = self.header.as_gnu_mut() {

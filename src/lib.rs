@@ -38,6 +38,7 @@ pub mod dir;
 pub mod image;
 pub mod layers;
 pub mod overlay;
+mod sparse;
 pub mod squashfs;
 pub mod tar;
 pub mod tracker;

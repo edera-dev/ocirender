@@ -850,3 +850,22 @@ fn test_fifo_suppressed_by_whiteout() {
         "whited-out FIFO must not appear in the output"
     );
 }
+
+#[test]
+fn test_malformed_pax_sparse_map_is_an_error() {
+    // A chunk past the declared real size, and chunks out of order: either
+    // must fail the merge rather than emit a mis-expanded file.
+    let past_end: &[(u64, &[u8])] = &[(4096, b"data")];
+    let out_of_order: &[(u64, &[u8])] = &[(4096, b"late"), (0, b"early")];
+    for (chunks, real_size) in [(past_end, 100), (out_of_order, 8192)] {
+        let layer = LayerBuilder::new()
+            .add_pax_sparse("bad.bin", "0.1", chunks, real_size)
+            .finish();
+        let err = ocirender::overlay::merge_layers_into(vec![blob(layer, 0)], Vec::new())
+            .expect_err("a malformed sparse map must fail the merge");
+        assert!(
+            format!("{err:#}").contains("sparse"),
+            "error must name the sparse map; got: {err:#}"
+        );
+    }
+}

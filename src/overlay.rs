@@ -44,6 +44,7 @@ use crate::{
     canonical::CanonicalTarHeader,
     image::LayerBlob,
     layers::open_layer,
+    sparse::PaxSparse,
     tracker::{EmittedPathTracker, HardLinkTracker, WhiteoutTracker},
 };
 
@@ -66,8 +67,28 @@ fn process_layer<W: Write>(
     let entries = archive.entries().context("reading tar entries")?;
     for entry_result in entries {
         let mut entry = entry_result.context("reading tar entry")?;
-        let raw_path = entry.path().context("entry path")?.into_owned();
+        let mut canonical =
+            CanonicalTarHeader::from_entry(&mut entry).context("capturing entry header")?;
+
+        // A PAX-format sparse file stands for a plain regular file: handle it
+        // as one, under its real path and with its holes filled back in.
+        let pax_sparse =
+            PaxSparse::detect(&canonical.pax_extensions).context("reading PAX sparse records")?;
+        let raw_path = match pax_sparse.as_ref().and_then(PaxSparse::name) {
+            Some(name) => name.to_path_buf(),
+            None => entry.path().context("entry path")?.into_owned(),
+        };
         let path = normalize_path(&raw_path);
+        let mut data: Box<dyn Read + '_> = match pax_sparse {
+            Some(sparse) => {
+                sparse.rewrite_header(&mut canonical);
+                let data = sparse
+                    .expand(&mut entry)
+                    .with_context(|| format!("expanding sparse file {}", path.display()))?;
+                Box::new(data)
+            }
+            None => Box::new(&mut entry),
+        };
 
         // Skip the root directory entry (`./`, `/`, or `.`), which normalises
         // to an empty path or `.` and is meaningless in a merged tar.
@@ -96,20 +117,16 @@ fn process_layer<W: Write>(
         if whiteout.is_suppressed(&path, blob.index) {
             // Buffer regular file content even for suppressed entries: a
             // hardlink in the same or an older layer may be alive and need
-            // these bytes for promotion to a standalone file. A sparse file is
-            // captured as a regular one, so it is buffered too.
-            let entry_type = entry.header().entry_type();
+            // these bytes for promotion to a standalone file. Sparse files are
+            // captured as regular ones by now, so they are buffered too.
             if matches!(
-                entry_type,
-                EntryType::Regular | EntryType::Continuous | EntryType::GNUSparse
+                canonical.entry_type(),
+                EntryType::Regular | EntryType::Continuous
             ) {
-                let canonical = CanonicalTarHeader::from_entry(&mut entry)
-                    .context("capturing suppressed entry header")?;
-                let mut data = Vec::new();
-                entry
-                    .read_to_end(&mut data)
+                let mut buffered = Vec::new();
+                data.read_to_end(&mut buffered)
                     .context("buffering suppressed file content")?;
-                hardlinks.note_suppressed_file(path, canonical, data);
+                hardlinks.note_suppressed_file(path, canonical, buffered);
             }
             // Directories, symlinks, and hardlinks pointing at suppressed
             // paths are dropped without buffering.
@@ -120,9 +137,6 @@ fn process_layer<W: Write>(
         if emitted.contains(&path) {
             continue;
         }
-
-        let canonical =
-            CanonicalTarHeader::from_entry(&mut entry).context("capturing entry header")?;
 
         if canonical.entry_type() == EntryType::Link {
             let link_target = canonical
@@ -153,7 +167,7 @@ fn process_layer<W: Write>(
         }
 
         canonical
-            .write_to_tar(&path, &mut entry, output)
+            .write_to_tar(&path, data, output)
             .with_context(|| format!("emitting {}", path.display()))?;
         emitted.insert(&path);
 

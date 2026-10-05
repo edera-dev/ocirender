@@ -588,3 +588,72 @@ fn regress_gnu_sparse_entry_promoted() {
         Some(expand_sparse(&chunks, real_size))
     );
 }
+
+/// Bug: PAX-format sparse files (GNU tar's sparse formats 0.0, 0.1 and 1.0, as `tar
+/// --format=posix --sparse` writes them) were passed through as the regular files they appear to
+/// be, with only their stored chunks as data. Formats 0.1 and 1.0 also file the entry under a
+/// `GNUSparseFile.<n>/` placeholder path, carrying the real one in `GNU.sparse.name`, so the merge
+/// keyed whiteouts and duplicates on the placeholder, and the dir output wrote the compacted data
+/// (at the placeholder path, for 0.1 and 1.0). The tar and squashfs outputs only came out right
+/// because GNU tar and mksquashfs decode the records themselves, and mksquashfs 4.7.5 rejects some
+/// format 1.0 entries outright. Each is now emitted as the regular file it describes.
+///
+/// Discovered via: code inspection, then confirmed with GNU tar sparse layers.
+#[test]
+fn regress_pax_sparse_entries_expanded() {
+    let chunks: [(u64, &[u8]); 2] = [(512, &[b'c'; 1024]), (32 * 1024, b"tail\n")];
+    let real_size = 40 * 1024;
+    for version in ["0.0", "0.1", "1.0"] {
+        let layer = LayerBuilder::new()
+            .add_pax_sparse("var/lib/db.bin", version, &chunks, real_size)
+            .add_file("etc/after", b"after\n", 0o644)
+            .finish();
+        let merged = merge(vec![blob(layer, 0)]);
+
+        assert_eq!(
+            paths_in_tar(&merged),
+            ["var/lib/db.bin", "etc/after"],
+            "format {version}: sparse file must be emitted at its real path"
+        );
+        assert_eq!(
+            file_contents_in_tar(&merged, "var/lib/db.bin"),
+            Some(expand_sparse(&chunks, real_size)),
+            "format {version}: holes must be filled back in"
+        );
+        let entry = canonical_entry_in_tar(&merged, "var/lib/db.bin").unwrap();
+        assert_eq!(entry.entry_type(), EntryType::Regular);
+        assert!(
+            entry
+                .pax_extensions
+                .iter()
+                .all(|(k, _)| !k.starts_with("GNU.sparse.")),
+            "format {version}: sparse records must not be re-emitted with expanded data"
+        );
+        assert_eq!(
+            file_contents_in_tar(&merged, "etc/after").as_deref(),
+            Some(&b"after\n"[..])
+        );
+    }
+}
+
+/// Variant of the above: a whiteout of a PAX-format sparse file must apply to it, which for
+/// formats 0.1 and 1.0 depends on keying the entry on its real path rather than the placeholder.
+#[test]
+fn regress_pax_sparse_entry_whiteout_applies() {
+    let chunks: [(u64, &[u8]); 1] = [(4096, b"data")];
+    for version in ["0.0", "0.1", "1.0"] {
+        let layer0 = LayerBuilder::new()
+            .add_pax_sparse("var/lib/db.bin", version, &chunks, 4100)
+            .finish();
+        let layer1 = LayerBuilder::new()
+            .add_whiteout("var/lib", "db.bin")
+            .finish();
+        let merged = merge(vec![blob(layer0, 0), blob(layer1, 1)]);
+
+        assert!(
+            paths_in_tar(&merged).is_empty(),
+            "format {version}: whited-out sparse file must not survive; got {:?}",
+            paths_in_tar(&merged)
+        );
+    }
+}

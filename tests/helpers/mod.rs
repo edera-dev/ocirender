@@ -208,6 +208,82 @@ impl LayerBuilder {
         self
     }
 
+    /// Add a PAX-format sparse file in GNU tar's sparse format `version`
+    /// (`"0.0"`, `"0.1"` or `"1.0"`), as `tar --format=posix --sparse
+    /// --sparse-version=<version>` writes it: only the `chunks` are stored,
+    /// the map goes in PAX records (or, for 1.0, ahead of the data), and
+    /// formats 0.1 and 1.0 file the entry under a `GNUSparseFile.0/`
+    /// placeholder path, naming the real one in a `GNU.sparse.name` record.
+    pub fn add_pax_sparse(
+        mut self,
+        path: &str,
+        version: &str,
+        chunks: &[(u64, &[u8])],
+        real_size: u64,
+    ) -> Self {
+        let mut pax: Vec<(&str, String)> = Vec::new();
+        let mut stored = Vec::new();
+        match version {
+            "0.0" => {
+                pax.push(("GNU.sparse.size", real_size.to_string()));
+                pax.push(("GNU.sparse.numblocks", chunks.len().to_string()));
+                for (offset, data) in chunks {
+                    pax.push(("GNU.sparse.offset", offset.to_string()));
+                    pax.push(("GNU.sparse.numbytes", data.len().to_string()));
+                }
+            }
+            "0.1" => {
+                let map: Vec<String> = chunks
+                    .iter()
+                    .map(|(offset, data)| format!("{offset},{}", data.len()))
+                    .collect();
+                pax.push(("GNU.sparse.size", real_size.to_string()));
+                pax.push(("GNU.sparse.numblocks", chunks.len().to_string()));
+                pax.push(("GNU.sparse.map", map.join(",")));
+                pax.push(("GNU.sparse.name", path.to_string()));
+            }
+            "1.0" => {
+                pax.push(("GNU.sparse.major", "1".into()));
+                pax.push(("GNU.sparse.minor", "0".into()));
+                pax.push(("GNU.sparse.name", path.to_string()));
+                pax.push(("GNU.sparse.realsize", real_size.to_string()));
+                stored.extend(format!("{}\n", chunks.len()).bytes());
+                for (offset, data) in chunks {
+                    stored.extend(format!("{offset}\n{}\n", data.len()).bytes());
+                }
+                stored.resize(stored.len().next_multiple_of(512), 0);
+            }
+            _ => panic!("unknown PAX sparse format {version}"),
+        }
+        for (_, data) in chunks {
+            stored.extend_from_slice(data);
+        }
+
+        let header_path = match version {
+            "0.0" => std::path::PathBuf::from(path),
+            _ => {
+                let path = std::path::Path::new(path);
+                let parent = path.parent().unwrap_or(std::path::Path::new(""));
+                parent
+                    .join("GNUSparseFile.0")
+                    .join(path.file_name().unwrap())
+            }
+        };
+        self.inner
+            .append_pax_extensions(pax.iter().map(|(k, v)| (*k, v.as_bytes())))
+            .unwrap();
+        let mut hdr = Header::new_ustar();
+        hdr.set_path(&header_path).unwrap();
+        hdr.set_size(stored.len() as u64);
+        hdr.set_mode(0o644);
+        hdr.set_mtime(0);
+        hdr.set_uid(0);
+        hdr.set_gid(0);
+        hdr.set_cksum();
+        self.inner.append(&hdr, Cursor::new(stored)).unwrap();
+        self
+    }
+
     pub fn add_whiteout(self, dir: &str, name: &str) -> Self {
         let path = if dir.is_empty() {
             format!(".wh.{name}")
