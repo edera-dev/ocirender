@@ -35,6 +35,9 @@ jobs:
         with:
           client-id: "${{ secrets.EDERA_CULTIVATION_APP_ID }}"
           private-key: "${{ secrets.EDERA_CULTIVATION_APP_PRIVATE_KEY }}"
+          # Scope to what release-plz's `release` command needs: create tags
+          # and GitHub releases.
+          permission-contents: write
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # zizmor: ignore[stale-action-refs]
@@ -86,6 +89,10 @@ jobs:
         with:
           client-id: "${{ secrets.EDERA_CULTIVATION_APP_ID }}"
           private-key: "${{ secrets.EDERA_CULTIVATION_APP_PRIVATE_KEY }}"
+          # Scope to what release-plz's `release-pr` command needs: push the
+          # release branch (contents) and open/update the PR (pull-requests).
+          permission-contents: write
+          permission-pull-requests: write
 
       - name: Run release-plz
         uses: release-plz/action@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5 # v0.5.139
