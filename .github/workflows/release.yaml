@@ -48,7 +48,7 @@ jobs:
         uses: ./.github/actions/quality-gate
 
       - name: Run release-plz
-        uses: release-plz/action@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5 # v0.5.139
+        uses: release-plz/action@6caa8d34f74d82b0dc76a18edd1cc3d6801c9baf # v0.5.143
         with:
           command: release
         env:
@@ -95,7 +95,7 @@ jobs:
           permission-pull-requests: write
 
       - name: Run release-plz
-        uses: release-plz/action@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5 # v0.5.139
+        uses: release-plz/action@6caa8d34f74d82b0dc76a18edd1cc3d6801c9baf # v0.5.143
         with:
           command: release-pr
         env:
