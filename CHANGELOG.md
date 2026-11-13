@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/edera-dev/ocirender/compare/v0.3.0...v0.3.1) - 2026-11-13
+
+### Other
+
+- *(deps)* bump github actions pins
+- *(cargo)* bump rust dependencies
+- Scope cultivator token to contents and pull-requests ([#77](https://github.com/edera-dev/ocirender/pull/77))
+
 ## [0.3.0](https://github.com/edera-dev/ocirender/compare/v0.2.3...v0.3.0) - 2026-10-05
 
 ### Added
